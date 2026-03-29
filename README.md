@@ -90,6 +90,13 @@ python scripts/migrate_sqlite_to_postgres.py --sqlite data/fuel_tracker.db --tru
 
 Якщо в `.env` для Docker лишається SQLite, а Postgres потрібен лише для міграції, зручно задати цільовий URL через **`POSTGRES_URL`**, щоб не змінювати `DATABASE_URL` бота локально.
 
+Якщо в PostgreSQL **немає рядків у `users`**, а заправки вже є (посилання `user_id` зламані), додай користувачів з локального SQLite:
+
+```bash
+export POSTGRES_URL='postgresql://...'
+python scripts/sync_users_sqlite_to_postgres.py --sqlite data/fuel_tracker.db
+```
+
 ### Важливо для Telegram
 
 Одночасно не запускайте **два** процеси з одним `BOT_TOKEN` (наприклад локально і на Railway у режимі polling) — отримуватиме лише один клієнт.
@@ -126,7 +133,8 @@ FuelBot/
 │   └── logging_config.py
 ├── models/             # SQLAlchemy
 ├── scripts/
-│   └── migrate_sqlite_to_postgres.py
+│   ├── migrate_sqlite_to_postgres.py
+│   └── sync_users_sqlite_to_postgres.py
 ├── services/           # AI, валюта, Google Sheets, …
 ├── Dockerfile
 ├── docker-compose.yml
