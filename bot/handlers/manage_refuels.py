@@ -15,7 +15,7 @@ from models.database import async_session, Refuel
 from bot.keyboards.menu import get_main_menu, get_back_to_menu_button
 from bot.states.edit_refuel_states import EditRefuelStates
 from services.refuel_calculator import recalculate_refuel_stats
-from bot.utils.user_helpers import get_user_id_by_telegram_id
+from bot.utils.user_helpers import get_user_id_for_refuels
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -65,7 +65,7 @@ def get_delete_confirmation_keyboard(refuel_id: int) -> InlineKeyboardMarkup:
 @router.message(Command("manage"))
 async def cmd_manage_refuels(message: Message):
     """Show list of refuels to manage"""
-    user_id = await get_user_id_by_telegram_id(message.from_user.id)
+    user_id = await get_user_id_for_refuels(message.from_user.id)
     await show_manage_refuels(message, user_id)
 
 
@@ -73,7 +73,7 @@ async def cmd_manage_refuels(message: Message):
 async def manage_refuels_callback(callback: CallbackQuery):
     """Show manage refuels from callback"""
     await callback.answer()
-    user_id = await get_user_id_by_telegram_id(callback.from_user.id)
+    user_id = await get_user_id_for_refuels(callback.from_user.id)
     await show_manage_refuels(callback.message, user_id, edit_message=True)
 
 
@@ -82,7 +82,7 @@ async def manage_refuels_page_callback(callback: CallbackQuery):
     """Handle pagination"""
     await callback.answer()
     page = int(callback.data.split("_")[-1])
-    user_id = await get_user_id_by_telegram_id(callback.from_user.id)
+    user_id = await get_user_id_for_refuels(callback.from_user.id)
     await show_manage_refuels(callback.message, user_id, page=page, edit_message=True)
 
 
@@ -176,7 +176,7 @@ async def show_refuel_details(callback: CallbackQuery):
     refuel_id = int(callback.data.split("_")[-1])
 
     # Get internal user_id from telegram_id
-    user_id = await get_user_id_by_telegram_id(callback.from_user.id)
+    user_id = await get_user_id_for_refuels(callback.from_user.id)
 
     try:
         async with async_session() as session:
@@ -268,7 +268,7 @@ async def edit_refuel(callback: CallbackQuery, state: FSMContext):
     refuel_id = int(callback.data.split("_")[-1])
 
     # Get internal user_id from telegram_id
-    user_id = await get_user_id_by_telegram_id(callback.from_user.id)
+    user_id = await get_user_id_for_refuels(callback.from_user.id)
 
     try:
         async with async_session() as session:
@@ -333,7 +333,7 @@ async def process_edit_date(message: Message, state: FSMContext):
         refuel_id = data.get('editing_refuel_id')
 
         # Get internal user_id from telegram_id
-        user_id = await get_user_id_by_telegram_id(message.from_user.id)
+        user_id = await get_user_id_for_refuels(message.from_user.id)
 
         # Parse date
         new_date = datetime.strptime(message.text.strip(), "%d.%m.%Y %H:%M")
@@ -400,7 +400,7 @@ async def process_edit_liters(message: Message, state: FSMContext):
         refuel_id = data.get('editing_refuel_id')
 
         # Get internal user_id from telegram_id
-        user_id = await get_user_id_by_telegram_id(message.from_user.id)
+        user_id = await get_user_id_for_refuels(message.from_user.id)
 
         # Parse liters
         new_liters = Decimal(message.text.strip().replace(',', '.'))
@@ -471,7 +471,7 @@ async def process_edit_price(message: Message, state: FSMContext):
         refuel_id = data.get('editing_refuel_id')
 
         # Get internal user_id from telegram_id
-        user_id = await get_user_id_by_telegram_id(message.from_user.id)
+        user_id = await get_user_id_for_refuels(message.from_user.id)
 
         # Parse price
         new_price = Decimal(message.text.strip().replace(',', '.'))
@@ -539,7 +539,7 @@ async def process_edit_odometer(message: Message, state: FSMContext):
         refuel_id = data.get('editing_refuel_id')
 
         # Get internal user_id from telegram_id
-        user_id = await get_user_id_by_telegram_id(message.from_user.id)
+        user_id = await get_user_id_for_refuels(message.from_user.id)
 
         # Parse odometer
         new_odometer = int(message.text.strip())
@@ -607,7 +607,7 @@ async def process_edit_station(message: Message, state: FSMContext):
         refuel_id = data.get('editing_refuel_id')
 
         # Get internal user_id from telegram_id
-        user_id = await get_user_id_by_telegram_id(message.from_user.id)
+        user_id = await get_user_id_for_refuels(message.from_user.id)
 
         new_station = message.text.strip()
 
@@ -669,7 +669,7 @@ async def process_edit_fuel_type(message: Message, state: FSMContext):
         refuel_id = data.get('editing_refuel_id')
 
         # Get internal user_id from telegram_id
-        user_id = await get_user_id_by_telegram_id(message.from_user.id)
+        user_id = await get_user_id_for_refuels(message.from_user.id)
 
         new_fuel_type = message.text.strip()
 
@@ -724,7 +724,7 @@ async def delete_refuel_confirmed(callback: CallbackQuery):
     refuel_id = int(callback.data.split("_")[-1])
 
     # Get internal user_id from telegram_id
-    user_id = await get_user_id_by_telegram_id(callback.from_user.id)
+    user_id = await get_user_id_for_refuels(callback.from_user.id)
 
     try:
         async with async_session() as session:

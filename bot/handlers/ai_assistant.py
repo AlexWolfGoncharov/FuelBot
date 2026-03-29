@@ -12,7 +12,7 @@ from sqlalchemy import select
 
 from models.database import async_session, Refuel, ChatHistory
 from bot.keyboards.menu import get_back_to_menu_button, get_ai_chat_buttons
-from bot.utils.user_helpers import get_user_id_by_telegram_id
+from bot.utils.user_helpers import get_user_id_for_refuels
 from services.ai_vision.gemini import get_gemini_ai_response
 
 router = Router()
@@ -154,7 +154,7 @@ async def ai_chat(message: Message):
     try:
         telegram_id = message.from_user.id
         fu = message.from_user
-        db_user_id = await get_user_id_by_telegram_id(
+        db_user_id = await get_user_id_for_refuels(
             telegram_id, username=fu.username, first_name=fu.first_name
         )
 

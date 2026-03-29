@@ -15,7 +15,7 @@ from sqlalchemy import select
 from bot.keyboards.inline import get_confirm_keyboard
 from bot.keyboards.menu import get_main_menu, get_back_to_menu_button
 from bot.states.refuel_states import BatchRefuelStates
-from bot.utils.user_helpers import get_user_id_by_telegram_id
+from bot.utils.user_helpers import get_user_id_for_refuels
 from models.database import async_session, User, Refuel
 from models.schemas import RefuelCreate
 from services.ai_vision.gemini import recognize_smart
@@ -139,7 +139,9 @@ async def process_batch(message: Message, state: FSMContext):
         return
 
     # Get internal user_id from telegram_id
-    user_id = await get_user_id_by_telegram_id(message.from_user.id)
+    user_id = await get_user_id_for_refuels(
+        message.from_user.id, message.from_user.username, message.from_user.first_name
+    )
 
     processing_msg = await message.answer(
         f"⏳ Обробляю {len(photos)} фото...\n"

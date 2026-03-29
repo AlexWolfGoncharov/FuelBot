@@ -10,7 +10,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
 from bot.states.refuel_states import RefuelStates, BatchRefuelStates
-from bot.utils.user_helpers import get_user_id_by_telegram_id
+from bot.utils.user_helpers import get_user_id_for_refuels
 from services.ai_vision.gemini import recognize_smart
 from models.database import async_session, Refuel
 from sqlalchemy import select, and_
@@ -240,7 +240,9 @@ async def smart_photo_handler(message: Message, state: FSMContext):
         return
 
     # Get internal user_id from telegram_id
-    user_id = await get_user_id_by_telegram_id(message.from_user.id)
+    user_id = await get_user_id_for_refuels(
+        message.from_user.id, message.from_user.username, message.from_user.first_name
+    )
     telegram_id = message.from_user.id
 
     # Check if this is part of a media group (album)
