@@ -130,8 +130,8 @@ def format_yearly_report_html(report: YearlyReport) -> str:
     }
 
     lines = [
-        f"📅 <b>Статистика за {report.year} рік</b> (по місяцях)\n",
-        "<b>Місяць</b> — пробіг, л/100км, грн, USD, літри, заправок\n",
+        f"📅 <b>Статистика за {report.year} рік</b> (кожен місяць окремо)\n",
+        "Колонки: місяць · проїхав км · середня витрата л/100км · грн · USD · літри · заправок\n",
     ]
 
     for m in report.months:
@@ -140,9 +140,10 @@ def format_yearly_report_html(report: YearlyReport) -> str:
         usd_part = f"${m.total_usd:.2f}" if m.usd_rows > 0 else "—"
         lines.append(
             f"\n<b>{name}</b>\n"
-            f"🛣 {m.km} км · ⛽ {cons} л/100км\n"
-            f"💵 {m.total_uah:.2f} грн · {usd_part}\n"
-            f"⛽ {m.liters:.2f} л · 📝 {m.refuels_count} заправок"
+            f"🛣 Проїхав: <b>{m.km}</b> км\n"
+            f"⛽ Середня витрата: <b>{cons}</b> л/100км\n"
+            f"💵 Витрати: <b>{m.total_uah:.2f}</b> грн · <b>{usd_part}</b> USD\n"
+            f"⛽ Літри: <b>{m.liters:.2f}</b> л · 📝 Заправок: <b>{m.refuels_count}</b>"
         )
 
     if not report.months:
@@ -158,9 +159,10 @@ def format_yearly_report_html(report: YearlyReport) -> str:
     y_usd = f"${report.total_usd:.2f}" if report.usd_rows > 0 else "—"
     lines.append(
         f"\n<b>Разом за рік:</b>\n"
-        f"🛣 {report.total_km} км · ⛽ середня витрата: {y_cons} л/100км\n"
-        f"💵 {report.total_uah:.2f} грн · {y_usd}\n"
-        f"⛽ {report.total_liters:.2f} л · 📝 {report.total_refuels} заправок"
+        f"🛣 Проїхав: <b>{report.total_km}</b> км\n"
+        f"⛽ Середня витрата (по заправках з даними): <b>{y_cons}</b> л/100км\n"
+        f"💵 Витрати: <b>{report.total_uah:.2f}</b> грн · <b>{y_usd}</b> USD\n"
+        f"⛽ Літри: <b>{report.total_liters:.2f}</b> л · 📝 Заправок: <b>{report.total_refuels}</b>"
     )
 
     return "\n".join(lines)

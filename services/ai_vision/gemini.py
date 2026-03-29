@@ -263,14 +263,14 @@ async def get_gemini_ai_response(prompt: str, chat_history: list = None, system_
 
         chat_history = normalize_gemini_chat_history(chat_history or [])
 
-        # Chat with history
+        # Chat with history (create() повертає AsyncChat синхронно — без await)
         if chat_history:
-            response = await client.aio.chats.create(
+            chat = client.aio.chats.create(
                 model=settings.gemini_model,
                 config=config,
-                history=chat_history
+                history=chat_history,
             )
-            message = await response.send_message(prompt)
+            message = await chat.send_message(prompt)
             text = message.text.strip()
         else:
             # Single message without history
