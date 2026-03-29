@@ -44,11 +44,8 @@ USER botuser
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 
-# No VOLUME here — Railway forbids VOLUME in Dockerfiles; use Railway volumes or Postgres.
-# Local Docker: mount ./data in docker-compose.yml if you need persistent SQLite.
-
-# Default SQLite path (Railway: set DATABASE_URL from Postgres — overrides this).
-ENV DATABASE_URL=sqlite+aiosqlite:///./data/fuel_tracker.db
+# No VOLUME — Railway forbids VOLUME in Dockerfiles; use Postgres or Railway Volumes if needed.
+# DATABASE_URL: set in Railway Variables (Postgres) or in docker-compose .env for local SQLite.
 
 # Run the bot
 CMD ["python", "bot/main.py"]

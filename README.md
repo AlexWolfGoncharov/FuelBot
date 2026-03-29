@@ -50,6 +50,21 @@ docker compose up -d --build
 
 Детальніше: [DOCKER_QUICKSTART.md](DOCKER_QUICKSTART.md)
 
+## Railway
+
+1. **New Project** → Deploy from **GitHub** → репозиторій FuelBot.
+2. Додай сервіс **PostgreSQL** (Add database → Postgres).
+3. У сервісі **бота** → **Variables** → додай **`DATABASE_URL`** через **Reference** на змінну з сервісу Postgres (або встав URL вруучну з картки бази).
+4. Додай вручну: `BOT_TOKEN`, `GEMINI_API_KEY`, `ALLOWED_USER_IDS`, за потреби `GOOGLE_SHEET_ID` та інше з `.env.example`.
+
+Збірка йде з **`Dockerfile`**, конфіг у корені: **`railway.toml`**.
+
+### Чи потрібен Volume у Railway?
+
+**Ні**, якщо використовуєш **PostgreSQL** у Railway: усі дані бота зберігаються в керованій БД, окреме дискове сховище не потрібне.
+
+**Volume** у Railway має сенс лише якщо ти свідомо зберігаєш щось у **файлах** у контейнері (наприклад, лише SQLite без Postgres, або великі локальні файли без S3). Для типового сценарію з Postgres — **не створюй Volume**.
+
 ## База даних
 
 | Середовище | Підхід |
@@ -112,6 +127,7 @@ FuelBot/
 ├── services/           # AI, валюта, Google Sheets, …
 ├── Dockerfile
 ├── docker-compose.yml
+├── railway.toml
 ├── requirements.txt
 └── README.md
 ```
