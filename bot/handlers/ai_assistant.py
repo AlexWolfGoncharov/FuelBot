@@ -8,6 +8,7 @@ from decimal import Decimal
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery
+from google.genai import types as genai_types
 from sqlalchemy import select
 
 from models.database import async_session, Refuel, ChatHistory
@@ -173,13 +174,16 @@ async def ai_chat(message: Message):
             history_records = result.scalars().all()
             history_records = list(reversed(history_records))  # Oldest first
 
-        # Build Gemini chat history format
-        gemini_history = []
+        # google-genai expects types.Content, not dicts (dict has no .role for the SDK)
+        gemini_history: list = []
         for record in history_records:
-            gemini_history.append({
-                "role": "user" if record.role == "user" else "model",
-                "parts": [record.message]
-            })
+            role = "user" if record.role == "user" else "model"
+            gemini_history.append(
+                genai_types.Content(
+                    role=role,
+                    parts=[genai_types.Part(text=record.message)],
+                )
+            )
 
         # Build system instruction with data and formatting rules
         system_instruction = f"""Ти - експерт-аналітик по витратам на паливо та економії палива в межах цього Telegram-бота.
