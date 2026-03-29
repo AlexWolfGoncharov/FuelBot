@@ -1,7 +1,9 @@
 """
 AI Assistant for analyzing refuel data
 """
+import html
 import logging
+import re
 
 from aiogram import Router, F
 from aiogram.filters import Command
@@ -19,6 +21,93 @@ logger = logging.getLogger(__name__)
 
 # Максимальний розмір контексту заправок у символах (захист від гігантських облікових записів)
 _AI_REFUEL_CONTEXT_MAX_CHARS = 900_000
+
+# Telegram Bot API: максимум 4096 символів на повідомлення
+_TELEGRAM_MAX_MESSAGE_LEN = 4096
+# Тіло plain при розбитті — з запасом під заголовок «частина i/n»
+_AI_PLAIN_CHUNK = 3500
+
+
+def _ai_response_to_plain(html_text: str) -> str:
+    """Прибирає HTML для безпечного багатоповідомленого виводу (без обрізаних тегів)."""
+    t = re.sub(r"<[^>]+>", "", html_text)
+    return html.unescape(t).strip()
+
+
+def _split_plain_text(text: str, max_chunk: int) -> list[str]:
+    """Розбиває текст по абзацах/рядках; жорстко ріже, якщо рядок довший за max_chunk."""
+    if not text:
+        return []
+    chunks: list[str] = []
+    rest = text
+    while rest:
+        if len(rest) <= max_chunk:
+            chunks.append(rest)
+            break
+        cut = rest.rfind("\n\n", 0, max_chunk)
+        if cut < max_chunk // 4:
+            cut = rest.rfind("\n", 0, max_chunk)
+        if cut <= 0:
+            cut = max_chunk
+        chunks.append(rest[:cut])
+        rest = rest[cut:].lstrip("\n")
+    return chunks
+
+
+async def _send_ai_response_telegram(
+    message: Message, processing_msg: Message, ai_response_html: str
+) -> None:
+    """Одне HTML-повідомлення або кілька plain — без MESSAGE_TOO_LONG."""
+    full = f"🤖 <b>AI Асистент:</b>\n\n{ai_response_html}"
+    if len(full) <= _TELEGRAM_MAX_MESSAGE_LEN:
+        await processing_msg.edit_text(
+            full,
+            parse_mode="HTML",
+            reply_markup=get_ai_chat_buttons(),
+        )
+        return
+
+    plain = _ai_response_to_plain(ai_response_html)
+    bodies = _split_plain_text(plain, _AI_PLAIN_CHUNK)
+    n = len(bodies)
+    if n == 0:
+        await processing_msg.edit_text(
+            "❌ Порожня відповідь AI.",
+            reply_markup=get_back_to_menu_button(),
+        )
+        return
+
+    # Довгий HTML при короткому тексті — одне plain-повідомлення без «1/1»
+    if n == 1:
+        text = f"🤖 AI Асистент\n\n{plain}"
+        if len(text) > _TELEGRAM_MAX_MESSAGE_LEN:
+            text = text[: _TELEGRAM_MAX_MESSAGE_LEN - 1] + "…"
+        await processing_msg.edit_text(text, reply_markup=get_ai_chat_buttons())
+        return
+
+    for i, body in enumerate(bodies):
+        if i == 0:
+            text = (
+                f"🤖 AI Асистент (1/{n})\n\n"
+                f"⚠️ Відповідь розбита на {n} частин (ліміт Telegram 4096 симв.).\n\n"
+                f"{body}"
+            )
+        else:
+            text = f"🤖 AI Асистент ({i + 1}/{n})\n\n{body}"
+
+        if len(text) > _TELEGRAM_MAX_MESSAGE_LEN:
+            logger.warning("AI chunk overflow %s, truncating one part", len(text))
+            text = text[: _TELEGRAM_MAX_MESSAGE_LEN - 1] + "…"
+
+        if i == 0:
+            await processing_msg.edit_text(
+                text,
+                reply_markup=get_ai_chat_buttons() if n == 1 else None,
+            )
+        elif i == n - 1:
+            await message.answer(text, reply_markup=get_ai_chat_buttons())
+        else:
+            await message.answer(text)
 
 
 def _sanitize_cell(value) -> str:
@@ -221,7 +310,7 @@ async def ai_chat(message: Message):
 - Для важливих цифр: <b>123</b>
 - Розділяй розділи порожнім рядком (використовуй \n\n)
 - НЕ використовуй markdown **, #, - тощо
-- Роби відповідь короткою і чіткою, без зайвих слів
+- Роби відповідь короткою і чіткою, без зайвих слів; орієнтир — до ~3000 символів, щоб вміститись в одне повідомлення Telegram (якщо користувач явно просить «повний звіт» — структуруй стисло таблицями).
 - Відповідай ЧИСТИМ ТЕКСТОМ з простими тегами, БЕЗ HTML-документа
 
 Приклад формату:
@@ -249,8 +338,6 @@ async def ai_chat(message: Message):
 
         # Clean response from unsupported HTML tags
         # Telegram supports only: b, strong, i, em, u, ins, s, strike, del, code, pre, a
-        import re
-
         # Remove DOCTYPE, html, head, body tags and their content
         ai_response = re.sub(r'<!DOCTYPE[^>]*>', '', ai_response, flags=re.IGNORECASE)
         ai_response = re.sub(r'<html[^>]*>|</html>', '', ai_response, flags=re.IGNORECASE)
@@ -284,14 +371,13 @@ async def ai_chat(message: Message):
 
             await session.commit()
 
-        # Send response
-        await processing_msg.edit_text(
-            f"🤖 <b>AI Асистент:</b>\n\n{ai_response}",
-            parse_mode="HTML",
-            reply_markup=get_ai_chat_buttons()
-        )
+        await _send_ai_response_telegram(message, processing_msg, ai_response)
 
-        logger.info(f"AI response sent to user telegram_id={telegram_id} for question: {user_question[:50]}")
+        logger.info(
+            "AI response sent to user telegram_id=%s for question: %s",
+            telegram_id,
+            user_question[:50],
+        )
 
     except Exception as e:
         logger.error(f"Error in AI chat: {e}", exc_info=True)
