@@ -24,7 +24,8 @@ async def show_stats_callback(callback: CallbackQuery):
     """Show stats from menu button"""
     await callback.answer()
     # Get internal user.id from telegram_id
-    user_id = await get_user_id_by_telegram_id(callback.from_user.id)
+    u = callback.from_user
+    user_id = await get_user_id_by_telegram_id(u.id, u.username, u.first_name)
     logger.info(f"Stats requested via callback by telegram_id={callback.from_user.id}, user_id={user_id}")
     await show_stats_for_user(callback.message, user_id)
 
@@ -33,7 +34,8 @@ async def show_stats_callback(callback: CallbackQuery):
 async def cmd_stats(message: Message):
     """Show statistics for current month"""
     # Get internal user.id from telegram_id
-    user_id = await get_user_id_by_telegram_id(message.from_user.id)
+    u = message.from_user
+    user_id = await get_user_id_by_telegram_id(u.id, u.username, u.first_name)
     logger.info(f"Stats requested via command by telegram_id={message.from_user.id}, user_id={user_id}")
     await show_stats_for_user(message, user_id)
 
@@ -136,7 +138,8 @@ async def show_history_callback(callback: CallbackQuery):
     """Show history from menu button"""
     await callback.answer()
     # Get internal user.id from telegram_id
-    user_id = await get_user_id_by_telegram_id(callback.from_user.id)
+    u = callback.from_user
+    user_id = await get_user_id_by_telegram_id(u.id, u.username, u.first_name)
     logger.info(f"History requested via callback by telegram_id={callback.from_user.id}, user_id={user_id}")
     await show_history_for_user(callback.message, user_id, page=0, edit=False)
 
@@ -147,7 +150,8 @@ async def history_page_callback(callback: CallbackQuery):
     await callback.answer()
     page = int(callback.data.split("_")[2])
     # Get internal user.id from telegram_id
-    user_id = await get_user_id_by_telegram_id(callback.from_user.id)
+    u = callback.from_user
+    user_id = await get_user_id_by_telegram_id(u.id, u.username, u.first_name)
     logger.info(f"History page {page} requested by telegram_id={callback.from_user.id}, user_id={user_id}")
     await show_history_for_user(callback.message, user_id, page=page, edit=True)
 
@@ -156,7 +160,8 @@ async def history_page_callback(callback: CallbackQuery):
 async def cmd_history(message: Message):
     """Show last 10 refuels"""
     # Get internal user.id from telegram_id
-    user_id = await get_user_id_by_telegram_id(message.from_user.id)
+    u = message.from_user
+    user_id = await get_user_id_by_telegram_id(u.id, u.username, u.first_name)
     logger.info(f"History requested via command by telegram_id={message.from_user.id}, user_id={user_id}")
     await show_history_for_user(message, user_id, page=0, edit=False)
 

@@ -9,7 +9,6 @@ from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery
 from sqlalchemy import select
-from sqlalchemy.exc import NoResultFound
 
 from models.database import async_session, Refuel, ChatHistory
 from bot.keyboards.menu import get_back_to_menu_button, get_ai_chat_buttons
@@ -154,15 +153,10 @@ async def ai_chat(message: Message):
 
     try:
         telegram_id = message.from_user.id
-        # Refuel.user_id is internal users.id, not Telegram id
-        try:
-            db_user_id = await get_user_id_by_telegram_id(telegram_id)
-        except NoResultFound:
-            await processing_msg.edit_text(
-                "Спочатку натисніть /start, щоб бот зареєстрував вас у системі.",
-                reply_markup=get_back_to_menu_button(),
-            )
-            return
+        fu = message.from_user
+        db_user_id = await get_user_id_by_telegram_id(
+            telegram_id, username=fu.username, first_name=fu.first_name
+        )
 
         # Get user's refuel data summary
         data_summary = await get_user_refuels_summary(db_user_id)
