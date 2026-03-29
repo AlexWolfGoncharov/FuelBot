@@ -11,6 +11,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 
 from bot.states.refuel_states import RefuelStates, BatchRefuelStates
 from bot.utils.user_helpers import get_user_id_for_refuels
+from bot.handlers.refuel import _telegram_message_naive_utc
 from services.ai_vision.gemini import recognize_smart
 from models.database import async_session, Refuel
 from sqlalchemy import select, and_
@@ -105,6 +106,7 @@ async def process_media_group(user_id: int, media_group_id: str, message: Messag
                 'file_id': file_id,
                 'image_data': image_data,
                 'photo_datetime': photo_datetime,
+                'telegram_message_date': _telegram_message_naive_utc(msg),
                 'message': msg
             })
 
@@ -147,7 +149,8 @@ async def process_media_group(user_id: int, media_group_id: str, message: Messag
                 results_in_pair.append({
                     **result,
                     'file_id': photo['file_id'],
-                    'photo_datetime': photo['photo_datetime']
+                    'photo_datetime': photo['photo_datetime'],
+                    'telegram_message_date': photo.get('telegram_message_date'),
                 })
                 if result['type'] == 'receipt':
                     receipts_count += 1

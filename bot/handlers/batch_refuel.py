@@ -2,7 +2,8 @@
 Batch refuel upload - handle multiple photos at once
 """
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from typing import Optional
 from decimal import Decimal
 from io import BytesIO
 
@@ -10,6 +11,8 @@ from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+
+from bot.handlers.refuel import resolve_refuel_datetime_from_state
 from sqlalchemy import select
 
 from bot.keyboards.inline import get_confirm_keyboard
@@ -25,6 +28,16 @@ from sqlalchemy import and_
 
 router = Router()
 logger = logging.getLogger(__name__)
+
+
+def _telegram_message_naive_utc(message: Message) -> Optional[datetime]:
+    """Час надсилання повідомлення в Telegram (naive UTC), якщо немає дати в чеку/EXIF."""
+    if not message.date:
+        return None
+    d = message.date
+    if d.tzinfo is not None:
+        return d.astimezone(timezone.utc).replace(tzinfo=None)
+    return d
 
 
 async def check_duplicate_refuel(user_id: int, receipt_data, odometer_data, photo_datetime=None) -> bool:
@@ -112,7 +125,8 @@ async def collect_photos(message: Message, state: FSMContext):
         'file_type': file_type,
         'image_bytes': image_bytes.getvalue(),
         'message_id': message.message_id,
-        'message_date': photo_datetime  # Add message date
+        'message_date': photo_datetime,  # для стиснутих фото = час у Telegram
+        'telegram_message_date': _telegram_message_naive_utc(message),
     })
 
     await state.update_data(photos=photos)
@@ -154,26 +168,27 @@ async def process_batch(message: Message, state: FSMContext):
 
         photos_with_time = []
         for i, photo in enumerate(photos, 1):
-            # Get datetime: EXIF for documents, message.date for compressed
             photo_datetime = None
+            telegram_dt = photo.get('telegram_message_date')
             if photo.get('message_date'):
-                # Compressed photo - use Telegram message date
                 photo_datetime = photo['message_date']
                 logger.info(f"DEBUG Photo {i}: Compressed, message_date = {photo_datetime}")
             else:
-                # Document - try EXIF
                 exif_datetime = extract_datetime_taken(photo['image_bytes'])
                 if exif_datetime:
                     photo_datetime = exif_datetime
                     logger.info(f"DEBUG Photo {i}: Document, EXIF datetime = {photo_datetime}")
                 else:
-                    logger.warning(f"DEBUG Photo {i}: No EXIF datetime found")
-                    photo_datetime = datetime.now()  # Fallback
+                    photo_datetime = telegram_dt or datetime.now()
+                    logger.warning(
+                        f"DEBUG Photo {i}: No EXIF, using Telegram send time: {photo_datetime}"
+                    )
 
             photos_with_time.append({
                 'file_id': photo['file_id'],
                 'image_bytes': photo['image_bytes'],
-                'photo_datetime': photo_datetime
+                'photo_datetime': photo_datetime,
+                'telegram_message_date': telegram_dt,
             })
 
         # STEP 2: Sort by timestamp
@@ -216,7 +231,8 @@ async def process_batch(message: Message, state: FSMContext):
                 results_in_pair.append({
                     **result,
                     'file_id': photo['file_id'],
-                    'photo_datetime': photo['photo_datetime']
+                    'photo_datetime': photo['photo_datetime'],
+                    'telegram_message_date': photo.get('telegram_message_date'),
                 })
                 if result['type'] == 'receipt':
                     receipts_count += 1
@@ -390,21 +406,16 @@ async def save_batch(callback: CallbackQuery, state: FSMContext):
             receipt = pair['receipt']['data'].model_dump()
             odometer = pair['odometer']['data'].model_dump()
 
-            # Use photo datetime if available (message.date or EXIF), fallback to receipt date
-            photo_datetime = pair['receipt'].get('photo_datetime')
-            if photo_datetime:
-                refuel_datetime = photo_datetime
-                logger.info(f"Using photo datetime: {refuel_datetime}")
-            elif receipt.get('date'):
-                refuel_datetime = datetime.strptime(
-                    f"{receipt['date']} {receipt['time']}" if receipt.get('time') else receipt['date'],
-                    "%Y-%m-%d %H:%M" if receipt.get('time') else "%Y-%m-%d"
-                )
-                logger.info(f"Using receipt datetime: {refuel_datetime}")
-            else:
-                # No date available - use current time
-                refuel_datetime = datetime.now()
-                logger.warning(f"No datetime available, using current time: {refuel_datetime}")
+            refuel_datetime, _ = resolve_refuel_datetime_from_state(
+                receipt,
+                {
+                    "photo_datetime": pair["receipt"].get("photo_datetime"),
+                    "telegram_message_date": pair["receipt"].get(
+                        "telegram_message_date"
+                    ),
+                },
+            )
+            logger.info(f"Batch refuel datetime resolved: {refuel_datetime}")
 
             # Calculate price_per_liter if not provided
             if not receipt.get('price_per_liter'):

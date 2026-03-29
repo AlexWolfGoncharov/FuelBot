@@ -8,7 +8,13 @@ from decimal import Decimal
 from datetime import datetime
 
 from PIL import Image
+from PIL import ExifTags
 from PIL.ExifTags import TAGS, GPSTAGS
+
+# EXIF tag ids (numeric) — DateTimeOriginal / Digitized live in Exif IFD, not always on top-level getexif()
+_EXIF_DATETIME_ORIGINAL = 36867
+_EXIF_DATETIME_DIGITIZED = 36868
+_EXIF_DATETIME = 306  # File change / 0th IFD
 from pillow_heif import register_heif_opener
 
 # Register HEIF opener to support HEIC files
@@ -100,9 +106,26 @@ def extract_gps_coordinates(image_bytes: bytes) -> Tuple[Optional[Decimal], Opti
         return None, None
 
 
+def _parse_exif_datetime(value) -> Optional[datetime]:
+    """Parse common EXIF datetime string formats."""
+    if value is None or not isinstance(value, str):
+        return None
+    value = value.strip()
+    for fmt in ("%Y:%m:%d %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+    logger.debug(f"Could not parse EXIF datetime: {value!r}")
+    return None
+
+
 def extract_datetime_taken(image_bytes: bytes) -> Optional[datetime]:
     """
     Extract datetime when photo was taken from EXIF data
+
+    Reads DateTimeOriginal / DateTimeDigitized from the Exif IFD (nested),
+    not only the top-level IFD — many phones/cameras store capture time there only.
 
     Args:
         image_bytes: Image file bytes
@@ -117,16 +140,31 @@ def extract_datetime_taken(image_bytes: bytes) -> Optional[datetime]:
         if not exif_data:
             return None
 
-        # Look for DateTime tags
+        # 1) Preferred: Exif sub-IFD (DateTimeOriginal, DateTimeDigitized)
+        try:
+            exif_ifd = exif_data.get_ifd(ExifTags.IFD.Exif)
+            for tag_id in (_EXIF_DATETIME_ORIGINAL, _EXIF_DATETIME_DIGITIZED):
+                dt = _parse_exif_datetime(exif_ifd.get(tag_id))
+                if dt:
+                    logger.info(f"EXIF capture time from Exif IFD tag {tag_id}: {dt}")
+                    return dt
+        except Exception as e:
+            logger.debug(f"No usable Exif IFD datetime: {e}")
+
+        # 2) Top-level tags (some files expose DateTime / DateTimeOriginal here)
         for tag, value in exif_data.items():
             tag_name = TAGS.get(tag, tag)
-            if tag_name in ['DateTime', 'DateTimeOriginal', 'DateTimeDigitized']:
-                try:
-                    # Format: "2024:01:15 14:30:00"
-                    return datetime.strptime(value, "%Y:%m:%d %H:%M:%S")
-                except ValueError:
-                    logger.debug(f"Could not parse datetime: {value}")
-                    continue
+            if tag_name in ("DateTime", "DateTimeOriginal", "DateTimeDigitized"):
+                dt = _parse_exif_datetime(value)
+                if dt:
+                    logger.info(f"EXIF datetime from top-level {tag_name}: {dt}")
+                    return dt
+
+        # 3) Direct numeric tag 306 on root (file modification time)
+        dt = _parse_exif_datetime(exif_data.get(_EXIF_DATETIME))
+        if dt:
+            logger.info(f"EXIF datetime from tag {_EXIF_DATETIME}: {dt}")
+            return dt
 
         return None
 

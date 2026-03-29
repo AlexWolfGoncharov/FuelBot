@@ -17,6 +17,7 @@ register_heif_opener()
 from config.settings import settings
 from models.schemas import ReceiptData, OdometerData
 from services.ai_vision.prompts import RECEIPT_RECOGNITION_PROMPT, ODOMETER_RECOGNITION_PROMPT
+from services.ai_vision.receipt_normalize import normalize_receipt_fields
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,8 @@ SMART_RECOGNITION_PROMPT = """Проаналізуй це зображення �
 
 **КРИТИЧНО ДЛЯ STATION**: Шукай НОМЕР конкретної заправки (АЗК №104, АЗС №60), а НЕ просто назву компанії (НЕ "Укрпалетсистем")!
 
+**ДАТА/ЧАС**: Бери з рядків **ДАТА/ЧАС** або фіскального чека (DD.MM.YYYY → date YYYY-MM-DD, час HH:MM:SS → time HH:MM). Не плутай з акціями/купонами.
+
 **ВАЖЛИВО ДЛЯ ЛІТРІВ**:
 - Об'єм баку автомобіля: 53 літри (МАКСИМУМ!)
 - Якщо бачиш число >53л - це помилка, перевір ще раз
@@ -57,7 +60,7 @@ SMART_RECOGNITION_PROMPT = """Проаналізуй це зображення �
 
 Якщо це ОДОМЕТР, type="odometer" і data містить:
 {
-  "odometer": пробіг в км (ціле число),
+  "odometer": ЗАГАЛЬНИЙ пробіг в км (великі цифри внизу, не trip, не швидкість),
   "confidence": відсоток впевненості (0-100)
 }
 
@@ -84,7 +87,7 @@ async def recognize_receipt(image_bytes: bytes) -> ReceiptData:
 
         # Generation config for better JSON extraction
         config = GenerateContentConfig(
-            temperature=0.2,  # Lower temperature for more deterministic output
+            temperature=0.1,
             top_p=0.95,
             top_k=40,
         )
@@ -111,6 +114,7 @@ async def recognize_receipt(image_bytes: bytes) -> ReceiptData:
 
         # Parse JSON
         data = json.loads(text)
+        data = normalize_receipt_fields(data)
         logger.info(f"Parsed JSON data: {data}")
 
         # Validate and create schema
@@ -176,7 +180,8 @@ async def recognize_odometer(image_bytes: bytes) -> OdometerData:
         # Generate content
         response = await client.aio.models.generate_content(
             model=settings.gemini_model,
-            contents=[ODOMETER_RECOGNITION_PROMPT, image]
+            contents=[ODOMETER_RECOGNITION_PROMPT, image],
+            config=GenerateContentConfig(temperature=0.1, top_p=0.95, top_k=40),
         )
 
         # Parse response
@@ -279,7 +284,7 @@ async def recognize_smart(image_bytes: bytes, user_context: str = None) -> dict:
         logger.info(f"Smart recognition for image, size: {image.size}")
 
         config = GenerateContentConfig(
-            temperature=0.2,
+            temperature=0.1,
             top_p=0.95,
             top_k=40,
         )
@@ -315,6 +320,8 @@ async def recognize_smart(image_bytes: bytes, user_context: str = None) -> dict:
 
         result_type = data.get('type', 'unknown')
         result_data = data.get('data', {})
+        if isinstance(result_data, dict) and result_type == 'receipt':
+            result_data = normalize_receipt_fields(result_data)
 
         logger.info(f"Smart recognition result: type={result_type}")
 

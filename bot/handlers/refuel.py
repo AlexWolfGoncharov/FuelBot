@@ -2,7 +2,8 @@
 Refuel handling - main handler for adding fuel records
 """
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional, Tuple
 from decimal import Decimal
 from io import BytesIO
 
@@ -22,6 +23,67 @@ from models.database import async_session, User, Refuel
 
 router = Router()
 logger = logging.getLogger(__name__)
+
+
+def _coerce_state_datetime(value: Any) -> Optional[datetime]:
+    """Restore datetime from FSM (may be datetime or ISO string)."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).replace(tzinfo=None)
+        except ValueError:
+            return None
+    return None
+
+
+def _telegram_message_naive_utc(message: Message) -> Optional[datetime]:
+    """Telegram message date as naive UTC for DB consistency."""
+    if not message.date:
+        return None
+    d = message.date
+    if d.tzinfo is not None:
+        return d.astimezone(timezone.utc).replace(tzinfo=None)
+    return d
+
+
+def resolve_refuel_datetime_from_state(
+    receipt: Dict[str, Any], data: Dict[str, Any]
+) -> Tuple[datetime, bool]:
+    """
+    Pick refuel timestamp: receipt OCR (дата з чека) > EXIF файлу > час відправки в Telegram > now.
+
+    Returns:
+        (refuel_datetime, trusted) — trusted=True якщо дата не з «зараз» (estimate_refuel_date не перезапише).
+    """
+    if receipt.get("date") and receipt.get("time"):
+        try:
+            return (
+                datetime.strptime(
+                    f"{receipt['date']} {receipt['time']}", "%Y-%m-%d %H:%M"
+                ),
+                True,
+            )
+        except ValueError:
+            pass
+
+    if receipt.get("date"):
+        try:
+            return (datetime.strptime(receipt["date"], "%Y-%m-%d"), True)
+        except ValueError:
+            pass
+
+    photo_dt = _coerce_state_datetime(data.get("photo_datetime"))
+    if photo_dt:
+        return photo_dt, True
+
+    tg = _coerce_state_datetime(data.get("telegram_message_date"))
+    if tg:
+        return tg, True
+
+    return datetime.now(), False
 
 
 @router.callback_query(F.data == "add_refuel")
@@ -108,13 +170,14 @@ async def process_receipt(message: Message, state: FSMContext):
         latitude, longitude = extract_gps_coordinates(image_data)
         photo_datetime = extract_datetime_taken(image_data)
 
-        # Save to state
+        # Save to state (Telegram message time as fallback if EXIF/OCR miss)
         await state.update_data(
             receipt=receipt_data.model_dump(),
             receipt_file_id=file_id,
             latitude=float(latitude) if latitude else None,
             longitude=float(longitude) if longitude else None,
-            photo_datetime=photo_datetime
+            photo_datetime=photo_datetime,
+            telegram_message_date=_telegram_message_naive_utc(message),
         )
 
         # Get USD rate and convert
@@ -129,12 +192,17 @@ async def process_receipt(message: Message, state: FSMContext):
         else:
             usd_text = f"💵 Сума: <b>{receipt_data.total_cost} грн</b>\n"
 
-        # Format message with recognized data
+        # Format message — same priority as save: OCR чека > EXIF > час повідомлення в Telegram
         date_time_text = ""
+        tg_dt = _telegram_message_naive_utc(message)
         if receipt_data.date and receipt_data.time:
-            date_time_text = f"📅 Дата: <b>{receipt_data.date} {receipt_data.time}</b>\n"
+            date_time_text = f"📅 Дата: <b>{receipt_data.date} {receipt_data.time}</b> (з тексту чека)\n"
         elif photo_datetime:
-            date_time_text = f"📅 Дата: <b>{photo_datetime.strftime('%Y-%m-%d %H:%M')}</b> (з EXIF фото)\n"
+            date_time_text = f"📅 Дата: <b>{photo_datetime.strftime('%Y-%m-%d %H:%M')}</b> (з EXIF файлу)\n"
+        elif tg_dt:
+            date_time_text = (
+                f"📅 Дата: <b>{tg_dt.strftime('%Y-%m-%d %H:%M')}</b> (час надсилання в Telegram)\n"
+            )
         else:
             now = datetime.now()
             date_time_text = f"📅 Дата: <b>{now.strftime('%Y-%m-%d %H:%M')}</b> (поточний час)\n"
@@ -292,19 +360,10 @@ async def process_odometer(message: Message, state: FSMContext):
             odometer_file_id=photo.file_id
         )
 
-        # Get receipt data to know the refuel date
+        # Get receipt data to know the refuel date (EXIF > OCR > Telegram)
         data = await state.get_data()
         receipt = data.get('receipt', {})
-
-        # Parse refuel datetime from receipt
-        refuel_datetime = None
-        if receipt.get('date') and receipt.get('time'):
-            refuel_datetime = datetime.strptime(
-                f"{receipt['date']} {receipt['time']}",
-                "%Y-%m-%d %H:%M"
-            )
-        elif data.get('photo_datetime'):
-            refuel_datetime = data['photo_datetime']
+        refuel_datetime, _ = resolve_refuel_datetime_from_state(receipt, data)
 
         # Get previous FULL TANK refuel BEFORE this refuel's date to calculate distance
         user_id = message.from_user.id
@@ -414,20 +473,11 @@ async def odometer_confirmed(callback: CallbackQuery, state: FSMContext):
             # Only calculate if this is a full tank refuel
             consumption = (Decimal(str(receipt['liters'])) / Decimal(str(distance_from_last))) * 100
 
-        # Parse datetime - prefer receipt date, then photo EXIF, then current time
-        if receipt.get('date') and receipt.get('time'):
-            refuel_datetime = datetime.strptime(
-                f"{receipt['date']} {receipt['time']}",
-                "%Y-%m-%d %H:%M"
-            )
-            logger.info(f"Using date from receipt: {refuel_datetime}")
-        elif data.get('photo_datetime'):
-            refuel_datetime = data['photo_datetime']
-            logger.info(f"Date not found on receipt, using photo EXIF: {refuel_datetime}")
-        else:
-            # If date/time not found anywhere, use current time
-            refuel_datetime = datetime.now()
-            logger.warning(f"Date/time not found on receipt or photo EXIF for user {user_id}, using current time: {refuel_datetime}")
+        # Parse datetime: EXIF > receipt OCR > Telegram send time > now
+        refuel_datetime, trusted_datetime = resolve_refuel_datetime_from_state(receipt, data)
+        logger.info(
+            f"Refuel datetime: {refuel_datetime}, trusted (exif/telegram): {trusted_datetime}"
+        )
 
         # Get USD exchange rate for the refuel date and convert
         exchange_service = get_exchange_rate_service()
@@ -475,7 +525,8 @@ async def odometer_confirmed(callback: CallbackQuery, state: FSMContext):
         refuel_datetime = await estimate_refuel_date(
             user_id=user.id,
             odometer=odometer['odometer'],
-            recognized_date=refuel_datetime
+            recognized_date=refuel_datetime,
+            trusted_datetime=trusted_datetime,
         )
 
         # Recalculate consumption with validated full_tank

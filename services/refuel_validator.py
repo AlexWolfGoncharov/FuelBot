@@ -92,7 +92,8 @@ async def validate_and_determine_full_tank(
 async def estimate_refuel_date(
     user_id: int,
     odometer: int,
-    recognized_date: Optional[datetime] = None
+    recognized_date: Optional[datetime] = None,
+    trusted_datetime: bool = False,
 ) -> datetime:
     """
     Estimate correct refuel date based on odometer if date is missing/incorrect
@@ -101,10 +102,15 @@ async def estimate_refuel_date(
         user_id: User ID
         odometer: Odometer reading
         recognized_date: Date from OCR (if available)
+        trusted_datetime: If True, recognized_date comes from EXIF / Telegram message time —
+            do not replace it with datetime.now() when odometer heuristics disagree.
 
     Returns:
         Estimated refuel date
     """
+    if trusted_datetime and recognized_date is not None:
+        logger.info(f"Keeping trusted capture/message datetime: {recognized_date}")
+        return recognized_date
 
     async with async_session() as session:
         # Get refuel before and after this odometer
