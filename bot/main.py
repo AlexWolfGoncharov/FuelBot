@@ -10,7 +10,18 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from config.settings import settings
 from config.logging_config import setup_logging
 from models.database import init_db
-from bot.handlers import start, refuel, stats, manage_refuels, ai_assistant, batch_refuel, smart_photo, manual_refuel
+from bot.handlers import (
+    start,
+    refuel,
+    stats,
+    manage_refuels,
+    ai_assistant,
+    batch_refuel,
+    smart_photo,
+    manual_refuel,
+    dashboard_web,
+)
+from bot.web_server import start_web_server
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +41,12 @@ async def main():
         logger.error(f"Failed to initialize database: {e}", exc_info=True)
         return
 
+    try:
+        await start_web_server()
+    except Exception as e:
+        logger.error(f"Failed to start web server: {e}", exc_info=True)
+        return
+
     # Create bot and dispatcher
     bot = Bot(token=settings.bot_token)
     dp = Dispatcher(storage=MemoryStorage())
@@ -42,6 +59,7 @@ async def main():
     dp.include_router(smart_photo.router)  # Handles photos WITHOUT state (must be before stats/manage)
     dp.include_router(stats.router)
     dp.include_router(manage_refuels.router)
+    dp.include_router(dashboard_web.router)
     dp.include_router(ai_assistant.router)  # AI chat must be last to catch unhandled text
 
     logger.info("All handlers registered")

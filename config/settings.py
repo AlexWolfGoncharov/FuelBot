@@ -50,6 +50,12 @@ class Settings(BaseSettings):
     # Logging
     log_level: str = "INFO"
 
+    # Тимчасовий HTML-дашборд (aiohttp на PORT разом з ботом)
+    enable_web_dashboard: bool = True
+    dashboard_ttl_seconds: int = 86400  # макс. 24 год
+    # Публічний URL сервісу без слешу в кінці, напр. https://fuelbot-production.up.railway.app
+    public_base_url: Optional[str] = None
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

@@ -71,7 +71,7 @@ async def show_help(callback: CallbackQuery):
         "📅 <b>Рік по місяцях</b> - пробіг, л/100км, грн, USD, літри по кожному місяцю\n"
         "📜 <b>Історія</b> - список заправок\n"
         "🚗 <b>Мої авто</b> - керувати автомобілями\n\n"
-        "<b>Команди:</b> /stats /year /year 2025 /history /ai\n\n"
+        "<b>Команди:</b> /stats /year /year 2025 /history /dashboard /ai\n\n"
         "Підтримувані АЗС: ОККО, WOG, БРСМ, UPG, Socar, Shell, ANP та інші"
     )
 
@@ -91,7 +91,7 @@ async def cmd_help(message: Message):
         "4. Сфотографуйте одометр\n"
         "5. Підтвердіть показання\n"
         "6. Готово! Дані збережені ✅\n\n"
-        "<b>Команди:</b> /stats · /year · /year 2025 · /history · /ai\n\n"
+        "<b>Команди:</b> /stats · /year · /year 2025 · /history · /dashboard · /ai\n\n"
         "Підтримувані АЗС: ОККО, WOG, БРСМ, UPG, Socar, Shell, ANP та інші"
     )
 
