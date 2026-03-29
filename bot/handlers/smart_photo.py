@@ -55,7 +55,8 @@ async def _strip_stale_smart_without_state(state: FSMContext) -> None:
     if not any(k in data for k in SMART_PAIR_KEYS):
         return
     st = await state.get_state()
-    if st == SmartPhotoStates.waiting_pair:
+    # get_state() повертає рядок; порівнювати з .state, не з об'єктом State
+    if st == SmartPhotoStates.waiting_pair.state:
         return
     cleaned = {k: v for k, v in data.items() if k not in SMART_PAIR_KEYS}
     await state.set_data(cleaned)
@@ -316,7 +317,7 @@ async def smart_photo_handler(message: Message, state: FSMContext):
     Послідовні фото (чек потім одометр або навпаки) зшиваються в одну заправку.
     """
     current_state = await state.get_state()
-    if current_state is not None and current_state != SmartPhotoStates.waiting_pair:
+    if current_state is not None and current_state != SmartPhotoStates.waiting_pair.state:
         return
 
     # Get internal user_id from telegram_id
@@ -387,7 +388,7 @@ async def smart_photo_handler(message: Message, state: FSMContext):
         data = await state.get_data()
 
         # --- Друге фото в режимі пари: зшити або замінити ту саму половину ---
-        if current_state == SmartPhotoStates.waiting_pair:
+        if current_state == SmartPhotoStates.waiting_pair.state:
             pr = data.get("smart_receipt")
             po = data.get("smart_odometer")
 
