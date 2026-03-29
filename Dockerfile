@@ -44,10 +44,10 @@ USER botuser
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 
-# Persistent dir for local SQLite / credentials (optional when using Railway Postgres)
-VOLUME ["/app/data"]
+# No VOLUME here — Railway forbids VOLUME in Dockerfiles; use Railway volumes or Postgres.
+# Local Docker: mount ./data in docker-compose.yml if you need persistent SQLite.
 
-# Default: SQLite on the volume. On Railway, set DATABASE_URL from the Postgres plugin (overrides this).
+# Default SQLite path (Railway: set DATABASE_URL from Postgres — overrides this).
 ENV DATABASE_URL=sqlite+aiosqlite:///./data/fuel_tracker.db
 
 # Run the bot
