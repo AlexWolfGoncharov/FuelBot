@@ -22,12 +22,6 @@ def _num(x: Any) -> Optional[float]:
     return float(x)
 
 
-def _clamp_calendar_year(y: int) -> int:
-    if y < 1990 or y > 2100:
-        raise ValueError(f"Рік поза діапазоном: {y}")
-    return y
-
-
 def _parse_limit_str(raw: str, default: int, cap: int) -> int:
     try:
         v = int(float(str(raw).strip()))
@@ -165,14 +159,6 @@ def make_fuel_tools(user_id: int) -> List[Callable[..., Any]]:
         y = datetime.now().year
         return await _monthly_report(y)
 
-    async def fuel_monthly_for_y(yr: int) -> dict[str, Any]:
-        """Помісячні агрегати за календарний рік yr (ціле число, наприклад 2024). AFC не приймає str для року — лише int."""
-        try:
-            y = _clamp_calendar_year(int(yr))
-        except (TypeError, ValueError) as e:
-            return {"error": str(e)}
-        return await _monthly_report(y)
-
     async def fuel_recent_refuels(limit: str) -> dict[str, Any]:
         """Останні заправки (новіші спочатку). limit — рядок з числом, наприклад 15; максимум 40."""
         lim = _parse_limit_str(limit or "15", 15, 40)
@@ -254,7 +240,6 @@ def make_fuel_tools(user_id: int) -> List[Callable[..., Any]]:
     return [
         fuel_account_overview,
         fuel_monthly_current_year,
-        fuel_monthly_for_y,
         fuel_recent_refuels,
         fuel_refuels_in_date_range,
         fuel_search_stations,
