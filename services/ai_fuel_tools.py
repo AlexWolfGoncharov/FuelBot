@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from decimal import Decimal
+import json
+import re
 from typing import Any, Callable, List, Optional
 
 from sqlalchemy import func, select
@@ -19,6 +21,48 @@ def _num(x: Any) -> Optional[float]:
     if isinstance(x, Decimal):
         return float(x)
     return float(x)
+
+
+def _parse_year_str(year: str) -> int:
+    """AFC передає рік як string — парсимо 4 цифри."""
+    s = (year or "").strip()
+    m = re.match(r"^(\d{4})", s)
+    if not m:
+        raise ValueError(f"Очікується рік YYYY, отримано: {year!r}")
+    y = int(m.group(1))
+    if y < 1990 or y > 2100:
+        raise ValueError(f"Рік поза діапазоном: {y}")
+    return y
+
+
+def _parse_limit_str(raw: str, default: int, cap: int) -> int:
+    try:
+        v = int(float(str(raw).strip()))
+    except (TypeError, ValueError):
+        v = default
+    return max(1, min(v, cap))
+
+
+def _parse_id_list_csv(raw: str) -> list[int]:
+    """Список id: '1,2,3' або JSON '[1,2,3]' — без List[int] у сигнатурі для AFC."""
+    s = (raw or "").strip()
+    if not s:
+        return []
+    if s.startswith("["):
+        try:
+            arr = json.loads(s)
+            if isinstance(arr, list):
+                out = []
+                for x in arr[:25]:
+                    out.append(int(x))
+                return out
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+    ids = []
+    for part in s.replace(" ", "").split(","):
+        if part.isdigit():
+            ids.append(int(part))
+    return ids[:25]
 
 
 def _row_compact(r: Refuel) -> dict[str, Any]:
@@ -70,18 +114,22 @@ def make_fuel_tools(user_id: int) -> List[Callable[..., Any]]:
             "rows_with_usd": int(usd_n or 0),
         }
 
-    async def fuel_monthly_for_year(year: int) -> dict[str, Any]:
-        """Агрегати по кожному місяцю за календарний рік: км, середня витрата л/100км, грн, USD, літри, кількість заправок."""
+    async def fuel_monthly_for_year(year: str) -> dict[str, Any]:
+        """Агрегати по кожному місяцю за календарний рік (рік як рядок, наприклад 2025): км, л/100км, грн, USD, літри, заправок."""
+        try:
+            y = _parse_year_str(year)
+        except ValueError as e:
+            return {"error": str(e)}
         async with async_session() as session:
             result = await session.execute(
                 select(Refuel)
                 .where(Refuel.user_id == user_id)
-                .where(Refuel.date >= datetime(year, 1, 1))
-                .where(Refuel.date < datetime(year + 1, 1, 1))
+                .where(Refuel.date >= datetime(y, 1, 1))
+                .where(Refuel.date < datetime(y + 1, 1, 1))
                 .order_by(Refuel.date.asc())
             )
             refuels = result.scalars().all()
-        rep = aggregate_refuels_by_month(list(refuels), year)
+        rep = aggregate_refuels_by_month(list(refuels), y)
         months = []
         names = [
             "",
@@ -112,7 +160,7 @@ def make_fuel_tools(user_id: int) -> List[Callable[..., Any]]:
                 }
             )
         return {
-            "year": year,
+            "year": y,
             "months": months,
             "year_totals": {
                 "km": rep.total_km,
@@ -124,9 +172,9 @@ def make_fuel_tools(user_id: int) -> List[Callable[..., Any]]:
             },
         }
 
-    async def fuel_recent_refuels(limit: int = 15) -> dict[str, Any]:
-        """Останні заправки (новіші спочатку). limit не більше 40."""
-        lim = max(1, min(int(limit or 15), 40))
+    async def fuel_recent_refuels(limit: str = "15") -> dict[str, Any]:
+        """Останні заправки (новіші спочатку). limit — рядок з числом, максимум 40."""
+        lim = _parse_limit_str(limit, 15, 40)
         async with async_session() as session:
             result = await session.execute(
                 select(Refuel)
@@ -168,13 +216,13 @@ def make_fuel_tools(user_id: int) -> List[Callable[..., Any]]:
 
     async def fuel_search_stations(
         query: str,
-        limit: int = 12,
+        limit: str = "12",
     ) -> dict[str, Any]:
-        """Пошук АЗС за підрядком у назві (без усієї таблиці). limit до 20."""
+        """Пошук АЗС за підрядком у назві. limit — рядок з числом, максимум 20."""
         q = (query or "").strip()[:80]
         if len(q) < 2:
             return {"error": "Занадто короткий запит (мінімум 2 символи)"}
-        lim = max(1, min(int(limit or 12), 20))
+        lim = _parse_limit_str(limit, 12, 20)
         pattern = f"%{q}%"
         async with async_session() as session:
             result = await session.execute(
@@ -187,11 +235,11 @@ def make_fuel_tools(user_id: int) -> List[Callable[..., Any]]:
             rows = result.scalars().all()
         return {"query": q, "items": [_row_compact(r) for r in rows]}
 
-    async def fuel_refuels_by_ids(refuel_ids: List[int]) -> dict[str, Any]:
-        """Отримати деталі конкретних записів за id (до 25 id за раз)."""
-        ids = [int(x) for x in (refuel_ids or [])[:25]]
+    async def fuel_refuels_by_ids(refuel_ids: str) -> dict[str, Any]:
+        """Деталі записів за id: рядок через кому (наприклад 340,341) або JSON-масив [340,341]. До 25 id."""
+        ids = _parse_id_list_csv(refuel_ids)
         if not ids:
-            return {"error": "Передайте непустий список id"}
+            return {"error": "Передайте непустий список id (через кому)"}
         async with async_session() as session:
             result = await session.execute(
                 select(Refuel)
