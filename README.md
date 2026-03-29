@@ -97,6 +97,15 @@ export POSTGRES_URL='postgresql://...'
 python scripts/sync_users_sqlite_to_postgres.py --sqlite data/fuel_tracker.db
 ```
 
+Якщо в `refuels` є `user_id = 1`, а рядка `users` з `id = 1` немає (або він «чужий»), створи зв’язок із своїм Telegram вручну:
+
+```bash
+export POSTGRES_URL='postgresql://...'
+python scripts/fix_user_row_for_refuels.py --user-id 1 --telegram-id ВАШ_TELEGRAM_ID
+```
+
+(`ВАШ_TELEGRAM_ID` — той самий числовий id, що в `ALLOWED_USER_IDS`.)
+
 ### Важливо для Telegram
 
 Одночасно не запускайте **два** процеси з одним `BOT_TOKEN` (наприклад локально і на Railway у режимі polling) — отримуватиме лише один клієнт.
@@ -134,7 +143,8 @@ FuelBot/
 ├── models/             # SQLAlchemy
 ├── scripts/
 │   ├── migrate_sqlite_to_postgres.py
-│   └── sync_users_sqlite_to_postgres.py
+│   ├── sync_users_sqlite_to_postgres.py
+│   └── fix_user_row_for_refuels.py
 ├── services/           # AI, валюта, Google Sheets, …
 ├── Dockerfile
 ├── docker-compose.yml
