@@ -31,8 +31,9 @@ class Settings(BaseSettings):
     gemini_api_key: str
     openai_api_key: Optional[str] = None
 
-    # Google Sheets
+    # Google Sheets (file locally; on Railway use GOOGLE_SHEETS_CREDENTIALS_JSON)
     google_sheets_credentials_file: str = "credentials.json"
+    google_sheets_credentials_json: Optional[str] = None
     google_sheet_id: str
 
     # Database (local: sqlite; Railway: set DATABASE_URL from Postgres plugin)

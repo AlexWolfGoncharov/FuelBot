@@ -1,6 +1,7 @@
 """
 Google Sheets integration for storing fuel records
 """
+import json
 import logging
 from datetime import datetime
 from decimal import Decimal
@@ -33,11 +34,15 @@ class GoogleSheetsService:
                 'https://www.googleapis.com/auth/drive'
             ]
 
-            # Add credentials
-            creds = ServiceAccountCredentials.from_json_keyfile_name(
-                settings.google_sheets_credentials_file,
-                scope
-            )
+            raw = settings.google_sheets_credentials_json
+            if raw and raw.strip():
+                key_dict = json.loads(raw)
+                creds = ServiceAccountCredentials.from_json_keyfile_dict(key_dict, scope)
+            else:
+                creds = ServiceAccountCredentials.from_json_keyfile_name(
+                    settings.google_sheets_credentials_file,
+                    scope
+                )
 
             # Authorize client
             self.client = gspread.authorize(creds)

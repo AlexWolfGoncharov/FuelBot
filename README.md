@@ -56,6 +56,7 @@ docker compose up -d --build
 2. Додай сервіс **PostgreSQL** (Add database → Postgres).
 3. У сервісі **бота** → **Variables** → додай **`DATABASE_URL`** через **Reference** на змінну з сервісу Postgres (або встав URL вруучну з картки бази).
 4. Додай вручну: `BOT_TOKEN`, `GEMINI_API_KEY`, `ALLOWED_USER_IDS`, за потреби `GOOGLE_SHEET_ID` та інше з `.env.example`.
+5. **Google Sheets:** файл `credentials.json` у контейнер не кладуть. Створи змінну **`GOOGLE_SHEETS_CREDENTIALS_JSON`** і встав туди **весь вміст** JSON з service account (як у файлі з Google Cloud). Можна в один рядок. Якщо ця змінна задана, шлях `GOOGLE_SHEETS_CREDENTIALS_FILE` ігнорується.
 
 Збірка йде з **`Dockerfile`**, конфіг у корені: **`railway.toml`**.
 
@@ -105,6 +106,7 @@ python scripts/migrate_sqlite_to_postgres.py --sqlite data/fuel_tracker.db --tru
 | `DATABASE_URL` | SQLite або PostgreSQL |
 | `POSTGRES_URL` | Опційно: лише для скрипта міграції, якщо `DATABASE_URL` — SQLite |
 | `GOOGLE_SHEET_ID` | За потреби інтеграції з таблицею |
+| `GOOGLE_SHEETS_CREDENTIALS_JSON` | Опційно: повний JSON service account (для Railway замість файлу) |
 
 Повний приклад — у `.env.example`.
 
