@@ -1,15 +1,16 @@
 """
-Інструменти для AI-агента: вибіркові запити до refuels (без повного дампу в промпт).
-Повертають компактні dict — серіалізуються в JSON для Gemini.
+Інструменти AI-агента: запити до refuels без повного дампу в промпт.
 
-Без ``from __future__ import annotations``: google-genai AFC будує Schema з
-``inspect.Parameter.annotation``; при відкладених анотаціях це рядки на кшталт
-``'int'``, і парсер падає з «Failed to parse the parameter …».
+Схеми для Gemini задаються явно (FunctionDeclaration + Schema), без
+FunctionDeclaration.from_callable — щоб не залежати від PEP 563 / inspect.
+Виконання — async-обробники; виклики збирає run_fuel_agent (ручний цикл).
 """
 from datetime import datetime, timedelta
 from decimal import Decimal
 import json
-from typing import Any, Callable, List, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional
+
+from google.genai import types as genai_types
 
 from sqlalchemy import func, select
 from models.database import Refuel, async_session
@@ -31,7 +32,6 @@ def _clamp_calendar_year(y: int) -> int:
 
 
 def _clamp_int_limit(value: Any, default: int, cap: int) -> int:
-    """AFC у google-genai часто ламається на str — ліміти лише як int/float у сигнатурі."""
     try:
         v = int(float(value))
     except (TypeError, ValueError):
@@ -40,7 +40,6 @@ def _clamp_int_limit(value: Any, default: int, cap: int) -> int:
 
 
 def _parse_id_list_csv(raw: str) -> list[int]:
-    """Список id: '1,2,3' або JSON '[1,2,3]' — без List[int] у сигнатурі для AFC."""
     s = (raw or "").strip()
     if not s:
         return []
@@ -77,11 +76,114 @@ def _row_compact(r: Refuel) -> dict[str, Any]:
     }
 
 
-def make_fuel_tools(user_id: int) -> List[Callable[..., Any]]:
-    """Замикання на user_id — окремий набір інструментів для кожного запиту."""
+def _schema_int(desc: str) -> genai_types.Schema:
+    return genai_types.Schema(
+        type=genai_types.Type.INTEGER,
+        description=desc,
+    )
+
+
+def _schema_str(desc: str) -> genai_types.Schema:
+    return genai_types.Schema(
+        type=genai_types.Type.STRING,
+        description=desc,
+    )
+
+
+def _build_fuel_gemini_tool() -> genai_types.Tool:
+    """Один Tool з усіма function_declarations (OpenAPI-подібна схема)."""
+    decls: list[genai_types.FunctionDeclaration] = [
+        genai_types.FunctionDeclaration(
+            name="fuel_account_overview",
+            description=(
+                "Підсумок обліку заправок: кількість, перша/остання дата, суми літрів, "
+                "грн, км між заправками, USD (якщо є). Без списку всіх рядків."
+            ),
+        ),
+        genai_types.FunctionDeclaration(
+            name="fuel_monthly_current_year",
+            description=(
+                "Помісячні агрегати за поточний календарний рік: км, л/100км, грн, USD, "
+                "літри, кількість заправок. Без параметрів — для «за цей рік» помісячно."
+            ),
+        ),
+        genai_types.FunctionDeclaration(
+            name="fuel_monthly_for_y",
+            description=(
+                "Помісячні агрегати за вказаний календарний рік (конкретний рік, наприклад 2024)."
+            ),
+            parameters=genai_types.Schema(
+                type=genai_types.Type.OBJECT,
+                properties={
+                    "yr": _schema_int("Календарний рік, наприклад 2024"),
+                },
+                required=["yr"],
+            ),
+        ),
+        genai_types.FunctionDeclaration(
+            name="fuel_recent_refuels",
+            description="Останні заправки (новіші спочатку). Обовʼязково вкажи limit.",
+            parameters=genai_types.Schema(
+                type=genai_types.Type.OBJECT,
+                properties={
+                    "limit": _schema_int("Скільки записів, 1–40 (типово 15)"),
+                },
+                required=["limit"],
+            ),
+        ),
+        genai_types.FunctionDeclaration(
+            name="fuel_refuels_in_date_range",
+            description=(
+                "Заправки в інтервалі дат inclusive, формат YYYY-MM-DD. До 100 рядків."
+            ),
+            parameters=genai_types.Schema(
+                type=genai_types.Type.OBJECT,
+                properties={
+                    "start_date": _schema_str("Початок YYYY-MM-DD"),
+                    "end_date": _schema_str("Кінець YYYY-MM-DD"),
+                },
+                required=["start_date", "end_date"],
+            ),
+        ),
+        genai_types.FunctionDeclaration(
+            name="fuel_search_stations",
+            description="Пошук АЗС за підрядком у назві станції.",
+            parameters=genai_types.Schema(
+                type=genai_types.Type.OBJECT,
+                properties={
+                    "query": _schema_str("Підрядок у назві (мінімум 2 символи)"),
+                    "limit": _schema_int("Скільки результатів, 1–20 (типово 12)"),
+                },
+                required=["query", "limit"],
+            ),
+        ),
+        genai_types.FunctionDeclaration(
+            name="fuel_refuels_by_ids",
+            description=(
+                "Деталі записів за id: через кому «340,341» або JSON-масив «[340,341]». До 25 id."
+            ),
+            parameters=genai_types.Schema(
+                type=genai_types.Type.OBJECT,
+                properties={
+                    "refuel_ids": _schema_str("Список id одним рядком"),
+                },
+                required=["refuel_ids"],
+            ),
+        ),
+    ]
+    return genai_types.Tool(function_declarations=decls)
+
+
+# Статична схема для API (не залежить від user_id)
+FUEL_GEMINI_TOOL = _build_fuel_gemini_tool()
+
+FuelHandler = Callable[..., Awaitable[dict[str, Any]]]
+
+
+def make_fuel_tool_handlers(user_id: int) -> Dict[str, FuelHandler]:
+    """Async-обробники за іменем функції (для ручного циклу function calling)."""
 
     async def fuel_account_overview() -> dict[str, Any]:
-        """Підсумок обліку: скільки заправок, перша/остання дата, суми літрів, грн, км між заправками, USD (якщо є в записах). Без списку всіх рядків."""
         async with async_session() as session:
             row = await session.execute(
                 select(
@@ -164,12 +266,10 @@ def make_fuel_tools(user_id: int) -> List[Callable[..., Any]]:
         }
 
     async def fuel_monthly_current_year() -> dict[str, Any]:
-        """Помісячні агрегати за поточний календарний рік: км, л/100км, грн, USD, літри, заправок. Без параметрів."""
         y = datetime.now().year
         return await _monthly_report(y)
 
     async def fuel_monthly_for_y(yr: int) -> dict[str, Any]:
-        """Помісячні агрегати за вказаний календарний рік (yr, наприклад 2024): км, л/100км, грн, USD, літри, заправок."""
         try:
             y = _clamp_calendar_year(int(yr))
         except (TypeError, ValueError) as e:
@@ -177,7 +277,6 @@ def make_fuel_tools(user_id: int) -> List[Callable[..., Any]]:
         return await _monthly_report(y)
 
     async def fuel_recent_refuels(limit: int) -> dict[str, Any]:
-        """Останні заправки (новіші спочатку). limit — ціле число, наприклад 15; максимум 40."""
         lim = _clamp_int_limit(limit, 15, 40)
         async with async_session() as session:
             result = await session.execute(
@@ -193,7 +292,6 @@ def make_fuel_tools(user_id: int) -> List[Callable[..., Any]]:
         start_date: str,
         end_date: str,
     ) -> dict[str, Any]:
-        """Заправки в інтервалі дат inclusive, формат YYYY-MM-DD. Максимум 100 рядків."""
         try:
             start_dt = datetime.strptime(start_date[:10], "%Y-%m-%d")
             end_dt = datetime.strptime(end_date[:10], "%Y-%m-%d") + timedelta(days=1)
@@ -222,7 +320,6 @@ def make_fuel_tools(user_id: int) -> List[Callable[..., Any]]:
         query: str,
         limit: int,
     ) -> dict[str, Any]:
-        """Пошук АЗС за підрядком у назві. limit — ціле число, наприклад 12; максимум 20."""
         q = (query or "").strip()[:80]
         if len(q) < 2:
             return {"error": "Занадто короткий запит (мінімум 2 символи)"}
@@ -240,7 +337,6 @@ def make_fuel_tools(user_id: int) -> List[Callable[..., Any]]:
         return {"query": q, "items": [_row_compact(r) for r in rows]}
 
     async def fuel_refuels_by_ids(refuel_ids: str) -> dict[str, Any]:
-        """Деталі записів за id: рядок через кому (наприклад 340,341) або JSON-масив [340,341]. До 25 id."""
         ids = _parse_id_list_csv(refuel_ids)
         if not ids:
             return {"error": "Передайте непустий список id (через кому)"}
@@ -254,12 +350,13 @@ def make_fuel_tools(user_id: int) -> List[Callable[..., Any]]:
             rows = result.scalars().all()
         return {"items": [_row_compact(r) for r in rows]}
 
-    return [
-        fuel_account_overview,
-        fuel_monthly_current_year,
-        fuel_monthly_for_y,
-        fuel_recent_refuels,
-        fuel_refuels_in_date_range,
-        fuel_search_stations,
-        fuel_refuels_by_ids,
-    ]
+    return {
+        "fuel_account_overview": fuel_account_overview,
+        "fuel_monthly_current_year": fuel_monthly_current_year,
+        "fuel_monthly_for_y": fuel_monthly_for_y,
+        "fuel_recent_refuels": fuel_recent_refuels,
+        "fuel_refuels_in_date_range": fuel_refuels_in_date_range,
+        "fuel_search_stations": fuel_search_stations,
+        "fuel_refuels_by_ids": fuel_refuels_by_ids,
+    }
+

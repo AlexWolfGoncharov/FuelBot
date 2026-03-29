@@ -5,7 +5,7 @@ aiogram==3.17.0
 python-dotenv==1.0.1
 
 # AI Services - NEW PACKAGE (google-generativeai deprecated)
-google-genai==1.6.0
+google-genai==1.47.0
 
 # Image Processing
 pillow==11.1.0
