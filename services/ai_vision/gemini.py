@@ -218,6 +218,26 @@ async def recognize_odometer(image_bytes: bytes) -> OdometerData:
         raise ValueError(f"Ошибка распознавания одометра: {str(e)}")
 
 
+def normalize_gemini_chat_history(history: list) -> list:
+    """
+    Gemini chat sessions require history to start with a user turn. DB or legacy rows
+    may begin with a model message — strip leading turns until the first user.
+    If the last turn is an orphan user (incomplete pair), drop it so history ends
+    on model before send_message(current question).
+    """
+    if not history:
+        return []
+
+    h = list(history)
+    while h and getattr(h[0], "role", None) != "user":
+        h.pop(0)
+
+    if h and getattr(h[-1], "role", None) == "user" and len(h) % 2 == 1:
+        h.pop()
+
+    return h
+
+
 async def get_gemini_ai_response(prompt: str, chat_history: list = None, system_instruction: str = None) -> str:
     """
     Get AI response from Gemini for general questions (chat assistant)
@@ -240,6 +260,8 @@ async def get_gemini_ai_response(prompt: str, chat_history: list = None, system_
             top_k=40,
             system_instruction=system_instruction
         )
+
+        chat_history = normalize_gemini_chat_history(chat_history or [])
 
         # Chat with history
         if chat_history:

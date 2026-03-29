@@ -18,6 +18,9 @@ def get_main_menu() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="📜 Історія", callback_data="show_history")
         ],
         [
+            InlineKeyboardButton(text="📅 Рік по місяцях", callback_data="show_year_stats"),
+        ],
+        [
             InlineKeyboardButton(text="🔧 Управління заправками", callback_data="manage_refuels")
         ],
         [

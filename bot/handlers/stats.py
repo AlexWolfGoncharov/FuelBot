@@ -2,17 +2,19 @@
 Statistics and history handlers
 """
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from decimal import Decimal
+from typing import Optional
 
 from aiogram import Router, F
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
 from aiogram.types import Message, CallbackQuery
 from bot.keyboards.menu import get_main_menu, get_back_to_menu_button
 from sqlalchemy import select, func
 
 from models.database import async_session, Refuel
 from services.refuel_calculator import recalculate_refuel_stats
+from services.yearly_monthly_stats import aggregate_refuels_by_month, format_yearly_report_html
 from bot.utils.user_helpers import get_user_id_for_refuels
 
 router = Router()
@@ -28,6 +30,75 @@ async def show_stats_callback(callback: CallbackQuery):
     user_id = await get_user_id_for_refuels(u.id, u.username, u.first_name)
     logger.info(f"Stats requested via callback by telegram_id={callback.from_user.id}, user_id={user_id}")
     await show_stats_for_user(callback.message, user_id)
+
+
+def _parse_year_arg(raw: Optional[str]) -> int:
+    now_y = datetime.now().year
+    if not raw or not raw.strip():
+        return now_y
+    try:
+        y = int(raw.strip())
+    except ValueError:
+        return now_y
+    if y < 1990 or y > 2100:
+        return now_y
+    return y
+
+
+@router.callback_query(F.data == "show_year_stats")
+async def show_year_stats_callback(callback: CallbackQuery):
+    """Річна статистика по місяцях (поточний рік)."""
+    await callback.answer()
+    u = callback.from_user
+    user_id = await get_user_id_for_refuels(u.id, u.username, u.first_name)
+    year = datetime.now().year
+    await _send_yearly_report(callback.message, user_id, year, edit=True)
+
+
+@router.message(Command("year"))
+async def cmd_year_stats(message: Message, command: CommandObject):
+    """Статистика за рік по місяцях: /year або /year 2025"""
+    u = message.from_user
+    user_id = await get_user_id_for_refuels(u.id, u.username, u.first_name)
+    year = _parse_year_arg(command.args)
+    await _send_yearly_report(message, user_id, year, edit=False)
+
+
+async def _send_yearly_report(message: Message, user_id: int, year: int, edit: bool = False):
+    """Завантажує заправки за рік, агрегує та відправляє HTML."""
+    try:
+        await recalculate_refuel_stats(user_id)
+        start = datetime(year, 1, 1)
+        end = datetime(year + 1, 1, 1)
+        async with async_session() as session:
+            result = await session.execute(
+                select(Refuel)
+                .where(Refuel.user_id == user_id)
+                .where(Refuel.date >= start)
+                .where(Refuel.date < end)
+                .order_by(Refuel.date.asc())
+            )
+            refuels = result.scalars().all()
+
+        report = aggregate_refuels_by_month(list(refuels), year)
+        text = format_yearly_report_html(report)
+
+        # Telegram limit 4096
+        if len(text) > 4000:
+            text = text[:3990] + "\n…"
+
+        kb = get_back_to_menu_button()
+        if edit:
+            await message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+        else:
+            await message.answer(text, parse_mode="HTML", reply_markup=kb)
+    except Exception as e:
+        logger.error(f"year stats error: {e}", exc_info=True)
+        err = f"❌ Помилка: {str(e)}"
+        if edit:
+            await message.edit_text(err, reply_markup=get_back_to_menu_button())
+        else:
+            await message.answer(err, reply_markup=get_back_to_menu_button())
 
 
 @router.message(Command("stats"))

@@ -2,8 +2,6 @@
 AI Assistant for analyzing refuel data
 """
 import logging
-from datetime import datetime, timedelta
-from decimal import Decimal
 
 from aiogram import Router, F
 from aiogram.filters import Command
@@ -19,85 +17,102 @@ from services.ai_vision.gemini import get_gemini_ai_response
 router = Router()
 logger = logging.getLogger(__name__)
 
+# Максимальний розмір контексту заправок у символах (захист від гігантських облікових записів)
+_AI_REFUEL_CONTEXT_MAX_CHARS = 900_000
 
-async def get_user_refuels_summary(user_id: int, days: int = None) -> str:
-    """Get summary of user's refuels for AI context"""
+
+def _sanitize_cell(value) -> str:
+    if value is None:
+        return ""
+    return str(value).replace("|", "/").replace("\n", " ").strip()
+
+
+async def get_user_refuels_ai_context(user_id: int) -> str:
+    """
+    Повний набір заправок користувача для системного промпта AI: підсумок + таблиця
+    всіх рядків (хронологія: від старіших до новіших).
+    """
     try:
-        # Get refuels for last N days, or ALL if days is None
         async with async_session() as session:
-            query = (
+            result = await session.execute(
                 select(Refuel)
                 .where(Refuel.user_id == user_id)
-                .order_by(Refuel.date.desc())
+                .order_by(Refuel.date.asc(), Refuel.id.asc())
             )
-
-            # Apply date filter only if days is specified
-            if days:
-                since_date = datetime.now() - timedelta(days=days)
-                query = query.where(Refuel.date >= since_date)
-
-            result = await session.execute(query)
             refuels = result.scalars().all()
 
         if not refuels:
-            return "У користувача немає заправок."
+            return "У користувача немає жодної заправки в базі."
 
-        # Build summary
-        period_text = f"за останні {days} днів" if days else "за весь період"
-        summary = f"Дані про заправки користувача {period_text}:\n\n"
-
-        # Overall stats
         total_liters = sum(r.liters for r in refuels)
         total_cost = sum(r.total_cost for r in refuels)
-        total_distance = sum(r.distance_from_last for r in refuels if r.distance_from_last)
+        total_km = sum(r.distance_from_last or 0 for r in refuels)
+        with_usd = [r for r in refuels if r.total_cost_usd is not None]
+        total_usd = sum(r.total_cost_usd for r in with_usd) if with_usd else None
 
-        summary += f"Загальна статистика:\n"
-        summary += f"- Всього заправок: {len(refuels)}\n"
-        summary += f"- Всього літрів: {total_liters:.2f} л\n"
-        summary += f"- Загальна вартість: {total_cost:.2f} грн\n"
-        summary += f"- Пробіг: {total_distance} км\n"
-        summary += f"- Середня ціна: {total_cost/total_liters:.2f} грн/л\n\n"
+        lines = [
+            "=== ПІДСУМОК (усі записи цього користувача в базі) ===",
+            (
+                f"Заправок: {len(refuels)} | Літрів загалом: {total_liters:.2f} | "
+                f"Сума грн: {total_cost:.2f} | Сумарний пробіг між заправками (км): {total_km}"
+            ),
+        ]
+        if total_usd is not None:
+            lines.append(
+                f"USD по заправках де є курс: ${total_usd:.2f} (записів з USD: {len(with_usd)})"
+            )
+        lines.append("")
+        lines.append(
+            "Повний перелік (кожен рядок — одна заправка). Роздільник полів: | "
+            "Колонки: id | дата_час | АЗС | паливо | л | грн_за_л | грн_всього | USD | "
+            "одометр_км | км_від_попередньої_повної | л_на_100км | повний_бак(1/0)"
+        )
+        lines.append("---")
 
-        # Consumption stats
-        refuels_with_consumption = [r for r in refuels if r.consumption]
-        if refuels_with_consumption:
-            avg_consumption = sum(r.consumption for r in refuels_with_consumption) / len(refuels_with_consumption)
-            summary += f"- Середня витрата: {avg_consumption:.2f} л/100км\n\n"
+        for r in refuels:
+            usd = f"{r.total_cost_usd:.2f}" if r.total_cost_usd is not None else ""
+            dist = str(r.distance_from_last) if r.distance_from_last is not None else ""
+            cons = f"{r.consumption:.2f}" if r.consumption is not None else ""
+            ft = "1" if r.full_tank else "0"
+            row = " | ".join(
+                [
+                    str(r.id),
+                    r.date.strftime("%Y-%m-%d %H:%M"),
+                    _sanitize_cell(r.station_name),
+                    _sanitize_cell(r.fuel_type),
+                    f"{r.liters:.2f}",
+                    f"{r.price_per_liter:.2f}",
+                    f"{r.total_cost:.2f}",
+                    usd,
+                    str(r.odometer),
+                    dist,
+                    cons,
+                    ft,
+                ]
+            )
+            lines.append(row)
 
-        # Stats by year and month for better context
-        from collections import defaultdict
-        by_year_month = defaultdict(list)
+        text = "\n".join(lines)
+        if len(text) > _AI_REFUEL_CONTEXT_MAX_CHARS:
+            text = text[:_AI_REFUEL_CONTEXT_MAX_CHARS] + (
+                "\n\n[... обрізано: перевищено ліміт розміру контексту ...]"
+            )
+            logger.warning(
+                "AI refuel context truncated: user_id=%s len>%s",
+                user_id,
+                _AI_REFUEL_CONTEXT_MAX_CHARS,
+            )
 
-        for refuel in refuels:
-            year_month = refuel.date.strftime("%Y-%m")
-            by_year_month[year_month].append(refuel)
-
-        summary += "Розподіл по місяцях:\n"
-        for year_month in sorted(by_year_month.keys(), reverse=True)[:12]:  # Last 12 months
-            month_refuels = by_year_month[year_month]
-            month_liters = sum(r.liters for r in month_refuels)
-            month_cost = sum(r.total_cost for r in month_refuels)
-            month_name = datetime.strptime(year_month, "%Y-%m").strftime("%m.%Y")
-            summary += f"  {month_name}: {len(month_refuels)} заправок, {month_liters:.1f}л, {month_cost:.0f}грн\n"
-
-        summary += "\n"
-
-        # Recent refuels
-        summary += "Останні 15 заправок:\n"
-        for i, refuel in enumerate(refuels[:15], 1):
-            date_str = refuel.date.strftime("%d.%m.%Y")
-            summary += f"{i}. {date_str}: {refuel.liters}л × {refuel.price_per_liter}грн = {refuel.total_cost}грн"
-            summary += f" | {refuel.station_name} | {refuel.fuel_type}"
-            if refuel.distance_from_last:
-                summary += f" | +{refuel.distance_from_last}км"
-            if refuel.consumption:
-                summary += f" | {refuel.consumption:.2f}л/100км"
-            summary += "\n"
-
-        return summary
+        logger.info(
+            "AI refuel context: user_id=%s refuels=%s chars=%s",
+            user_id,
+            len(refuels),
+            len(text),
+        )
+        return text
 
     except Exception as e:
-        logger.error(f"Error getting refuels summary: {e}", exc_info=True)
+        logger.error(f"Error building refuel AI context: {e}", exc_info=True)
         return f"Помилка отримання даних: {str(e)}"
 
 
@@ -115,8 +130,9 @@ async def cmd_ai_help(message: Message):
         "• Коли найкраще заправлятись?\n"
         "• Порівняй витрати за різні місяці\n"
         "• Дай поради щодо економії\n\n"
-        "💬 Просто напишіть ваше питання, і я відповім на основі ваших даних!\n\n"
-        "💡 <i>Я пам'ятаю контекст розмови - можете ставити уточнюючі питання</i>\n"
+        "💬 Напишіть питання — у контексті для кожної відповіді передаються "
+        "<b>усі ваші заправки з бази</b> (повний перелік + підсумок).\n\n"
+        "💡 <i>Пам'ятаю останні репліки діалогу — можна уточнювати</i>\n"
         "🗑 Команда /clear_chat - очистити історію діалогу"
     )
 
@@ -159,17 +175,17 @@ async def ai_chat(message: Message):
             telegram_id, username=fu.username, first_name=fu.first_name
         )
 
-        # Get user's refuel data summary
-        data_summary = await get_user_refuels_summary(db_user_id)
+        # Повний набір заправок у системному промпті
+        data_summary = await get_user_refuels_ai_context(db_user_id)
 
-        # Get chat history (last 10 messages to keep context manageable)
+        # Історія діалогу (останні 20 повідомлень = до 10 пар)
         # ChatHistory.user_id is stored as Telegram id (legacy column usage)
         async with async_session() as session:
             result = await session.execute(
                 select(ChatHistory)
                 .where(ChatHistory.user_id == telegram_id)
                 .order_by(ChatHistory.created_at.desc())
-                .limit(10)
+                .limit(20)
             )
             history_records = result.scalars().all()
             history_records = list(reversed(history_records))  # Oldest first
@@ -186,15 +202,16 @@ async def ai_chat(message: Message):
             )
 
         # Build system instruction with data and formatting rules
-        system_instruction = f"""Ти - експерт-аналітик по витратам на паливо та економії палива в межах цього Telegram-бота.
+        system_instruction = f"""Ти — повноцінний AI-асистент з обліку палива в цьому Telegram-боті.
 
-КРИТИЧНО: Нижче вже передано зріз даних з обліку заправок цього користувача з бази бота. Ти НЕ маєш казати, що «немає доступу до бази» або що ти «не бачиш дані» — якщо блок порожній або написано що заправок немає, відповідай з цього факту (наприклад запропонуй додати заправки), а не відмовляйся.
+КРИТИЧНО: Нижче — ПОВНИЙ перелік УСІХ заправок цього користувача з бази (таблиця + підсумок). Це актуальні дані обліку. Не кажи, що «немає доступу до бази» чи «не бачиш дані»: опирайся лише на цей блок. Якщо заправок немає — відповідай відповідно (наприклад, запропонуй додати перші записи).
+
+Можеш рахувати будь-які агрегати (по місяцях, роках, АЗС, витраті), порівнювати періоди, знаходити аномалії, тренди, середні значення — усе це вже є в таблиці нижче.
 
 {data_summary}
 
-Проаналізуй дані та дай детальну, корисну відповідь українською мовою.
-Якщо в даних є тренди - вкажи їх. Якщо можеш дати поради - дай їх.
-Використовуй конкретні цифри з даних.
+Відповідай детально й по суті українською. Опирайся на конкретні id/дати/суми з таблиці, коли це доречно.
+Якщо в даних є тренди чи закономірності — назви їх. Поради щодо економії — лише якщо доречно.
 
 ВАЖЛИВО - ФОРМАТУВАННЯ:
 - Використовуй ТІЛЬКИ ці HTML теги: <b>, <i>, <u>, <code>
