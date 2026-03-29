@@ -23,8 +23,8 @@ _AGENT_SYSTEM = """Ти — аналітик витрат на паливо в T
 
 ІНСТРУМЕНТИ (аргументи рядками, як вимагає API):
 - fuel_account_overview — загальні суми та діапазон дат.
-- fuel_monthly_current_year — помісячно за поточний календарний рік, без параметрів (для «за цей рік»).
-- fuel_monthly_for_calendar_year(calendar_year) — помісячно за вказаний рік; рядок на кшталт "2025" (параметр не називається year).
+- fuel_monthly_current_year — помісячно за поточний календарний рік, без параметрів. Для «за цей рік» / «поточний рік» ВИКЛЮЧНО цей інструмент.
+- fuel_monthly_for_y(yr) — помісячно за вказаний рік; yr — ціле число (наприклад 2024). Не використовуй для поточного року, якщо є fuel_monthly_current_year.
 - fuel_recent_refuels(limit) — ліміт рядком, наприклад "15".
 - fuel_refuels_in_date_range — інтервал дат YYYY-MM-DD.
 - fuel_search_stations(query, limit) — обидва аргументи; limit рядком, наприклад "12".

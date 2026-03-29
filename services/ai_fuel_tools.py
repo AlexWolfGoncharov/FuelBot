@@ -7,7 +7,6 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from decimal import Decimal
 import json
-import re
 from typing import Any, Callable, List, Optional
 
 from sqlalchemy import func, select
@@ -23,13 +22,7 @@ def _num(x: Any) -> Optional[float]:
     return float(x)
 
 
-def _parse_year_str(year: str) -> int:
-    """AFC передає рік як string — парсимо 4 цифри."""
-    s = (year or "").strip()
-    m = re.match(r"^(\d{4})", s)
-    if not m:
-        raise ValueError(f"Очікується рік YYYY, отримано: {year!r}")
-    y = int(m.group(1))
+def _clamp_calendar_year(y: int) -> int:
     if y < 1990 or y > 2100:
         raise ValueError(f"Рік поза діапазоном: {y}")
     return y
@@ -172,11 +165,11 @@ def make_fuel_tools(user_id: int) -> List[Callable[..., Any]]:
         y = datetime.now().year
         return await _monthly_report(y)
 
-    async def fuel_monthly_for_calendar_year(calendar_year: str) -> dict[str, Any]:
-        """Помісячні агрегати за вказаний рік; calendar_year наприклад рядок 2024 або 2025 (параметр НЕ називається year — обмеження API)."""
+    async def fuel_monthly_for_y(yr: int) -> dict[str, Any]:
+        """Помісячні агрегати за календарний рік yr (ціле число, наприклад 2024). AFC не приймає str для року — лише int."""
         try:
-            y = _parse_year_str(calendar_year)
-        except ValueError as e:
+            y = _clamp_calendar_year(int(yr))
+        except (TypeError, ValueError) as e:
             return {"error": str(e)}
         return await _monthly_report(y)
 
@@ -261,7 +254,7 @@ def make_fuel_tools(user_id: int) -> List[Callable[..., Any]]:
     return [
         fuel_account_overview,
         fuel_monthly_current_year,
-        fuel_monthly_for_calendar_year,
+        fuel_monthly_for_y,
         fuel_recent_refuels,
         fuel_refuels_in_date_range,
         fuel_search_stations,
