@@ -22,9 +22,10 @@ def _num(x: Any) -> Optional[float]:
     return float(x)
 
 
-def _parse_limit_str(raw: str, default: int, cap: int) -> int:
+def _clamp_int_limit(value: Any, default: int, cap: int) -> int:
+    """AFC у google-genai часто ламається на str — ліміти лише як int/float у сигнатурі."""
     try:
-        v = int(float(str(raw).strip()))
+        v = int(float(value))
     except (TypeError, ValueError):
         v = default
     return max(1, min(v, cap))
@@ -159,9 +160,9 @@ def make_fuel_tools(user_id: int) -> List[Callable[..., Any]]:
         y = datetime.now().year
         return await _monthly_report(y)
 
-    async def fuel_recent_refuels(limit: str) -> dict[str, Any]:
-        """Останні заправки (новіші спочатку). limit — рядок з числом, наприклад 15; максимум 40."""
-        lim = _parse_limit_str(limit or "15", 15, 40)
+    async def fuel_recent_refuels(limit: int) -> dict[str, Any]:
+        """Останні заправки (новіші спочатку). limit — ціле число, наприклад 15; максимум 40."""
+        lim = _clamp_int_limit(limit, 15, 40)
         async with async_session() as session:
             result = await session.execute(
                 select(Refuel)
@@ -203,13 +204,13 @@ def make_fuel_tools(user_id: int) -> List[Callable[..., Any]]:
 
     async def fuel_search_stations(
         query: str,
-        limit: str,
+        limit: int,
     ) -> dict[str, Any]:
-        """Пошук АЗС за підрядком у назві. limit — рядок з числом, наприклад 12; максимум 20."""
+        """Пошук АЗС за підрядком у назві. limit — ціле число, наприклад 12; максимум 20."""
         q = (query or "").strip()[:80]
         if len(q) < 2:
             return {"error": "Занадто короткий запит (мінімум 2 символи)"}
-        lim = _parse_limit_str(limit or "12", 12, 20)
+        lim = _clamp_int_limit(limit, 12, 20)
         pattern = f"%{q}%"
         async with async_session() as session:
             result = await session.execute(
