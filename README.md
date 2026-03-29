@@ -103,6 +103,7 @@ python scripts/migrate_sqlite_to_postgres.py --sqlite data/fuel_tracker.db --tru
 | `BOT_TOKEN` | Токен від @BotFather |
 | `ALLOWED_USER_IDS` | Telegram user id через кому |
 | `GEMINI_API_KEY` | Ключ Gemini |
+| `GEMINI_MODEL` | Опційно: напр. `gemini-2.5-flash` (за замовчуванням) або `gemini-2.0-flash` |
 | `DATABASE_URL` | SQLite або PostgreSQL |
 | `POSTGRES_URL` | Опційно: лише для скрипта міграції, якщо `DATABASE_URL` — SQLite |
 | `GOOGLE_SHEET_ID` | За потреби інтеграції з таблицею |

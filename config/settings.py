@@ -29,6 +29,7 @@ class Settings(BaseSettings):
 
     # AI Services
     gemini_api_key: str
+    gemini_model: str = "gemini-2.5-flash"
     openai_api_key: Optional[str] = None
 
     # Google Sheets (file locally; on Railway use GOOGLE_SHEETS_CREDENTIALS_JSON)

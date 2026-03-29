@@ -91,7 +91,7 @@ async def recognize_receipt(image_bytes: bytes) -> ReceiptData:
 
         # Generate content
         response = await client.aio.models.generate_content(
-            model='gemini-2.0-flash-exp',
+            model=settings.gemini_model,
             contents=[RECEIPT_RECOGNITION_PROMPT, image],
             config=config
         )
@@ -175,7 +175,7 @@ async def recognize_odometer(image_bytes: bytes) -> OdometerData:
 
         # Generate content
         response = await client.aio.models.generate_content(
-            model='gemini-2.0-flash-exp',
+            model=settings.gemini_model,
             contents=[ODOMETER_RECOGNITION_PROMPT, image]
         )
 
@@ -239,7 +239,7 @@ async def get_gemini_ai_response(prompt: str, chat_history: list = None, system_
         # Chat with history
         if chat_history:
             response = await client.aio.chats.create(
-                model='gemini-2.0-flash-exp',
+                model=settings.gemini_model,
                 config=config,
                 history=chat_history
             )
@@ -248,7 +248,7 @@ async def get_gemini_ai_response(prompt: str, chat_history: list = None, system_
         else:
             # Single message without history
             response = await client.aio.models.generate_content(
-                model='gemini-2.0-flash-exp',
+                model=settings.gemini_model,
                 contents=prompt,
                 config=config
             )
@@ -291,7 +291,7 @@ async def recognize_smart(image_bytes: bytes, user_context: str = None) -> dict:
             logger.info(f"Added user context to prompt: {user_context}")
 
         response = await client.aio.models.generate_content(
-            model='gemini-2.0-flash-exp',
+            model=settings.gemini_model,
             contents=[prompt, image],
             config=config
         )
@@ -396,7 +396,7 @@ async def test_gemini_connection() -> bool:
     """
     try:
         response = await client.aio.models.generate_content(
-            model='gemini-2.0-flash-exp',
+            model=settings.gemini_model,
             contents="Hello"
         )
         logger.info("Gemini API connection test successful")
