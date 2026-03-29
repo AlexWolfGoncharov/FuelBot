@@ -11,16 +11,17 @@ from aiogram.types import Message, CallbackQuery
 from google.genai import types as genai_types
 from sqlalchemy import select
 
-from models.database import async_session, Refuel, ChatHistory
+from models.database import async_session, ChatHistory
 from bot.keyboards.menu import get_back_to_menu_button, get_ai_chat_buttons
 from bot.utils.user_helpers import get_user_id_for_refuels
-from services.ai_vision.gemini import get_gemini_ai_response
+from services.ai_fuel_agent import run_fuel_agent
 
 router = Router()
 logger = logging.getLogger(__name__)
 
-# Максимальний розмір контексту заправок у символах (захист від гігантських облікових записів)
-_AI_REFUEL_CONTEXT_MAX_CHARS = 900_000
+# Історія діалогу в Gemini: обмеження розміру повідомлень асистента
+_AI_HISTORY_MESSAGES = 12
+_MAX_ASSISTANT_CHARS = 2500
 
 # Telegram Bot API: максимум 4096 символів на повідомлення
 _TELEGRAM_MAX_MESSAGE_LEN = 4096
@@ -110,99 +111,21 @@ async def _send_ai_response_telegram(
             await message.answer(text)
 
 
-def _sanitize_cell(value) -> str:
-    if value is None:
-        return ""
-    return str(value).replace("|", "/").replace("\n", " ").strip()
-
-
-async def get_user_refuels_ai_context(user_id: int) -> str:
-    """
-    Повний набір заправок користувача для системного промпта AI: підсумок + таблиця
-    всіх рядків (хронологія: від старіших до новіших).
-    """
-    try:
-        async with async_session() as session:
-            result = await session.execute(
-                select(Refuel)
-                .where(Refuel.user_id == user_id)
-                .order_by(Refuel.date.asc(), Refuel.id.asc())
+def _history_records_to_contents(history_records) -> list:
+    """Діалог для Gemini: укорочені відповіді асистента, щоб не роздувати токени."""
+    out = []
+    for record in history_records:
+        role = "user" if record.role == "user" else "model"
+        text = record.message or ""
+        if role == "model" and len(text) > _MAX_ASSISTANT_CHARS:
+            text = text[:_MAX_ASSISTANT_CHARS] + "\n…"
+        out.append(
+            genai_types.Content(
+                role=role,
+                parts=[genai_types.Part(text=text)],
             )
-            refuels = result.scalars().all()
-
-        if not refuels:
-            return "У користувача немає жодної заправки в базі."
-
-        total_liters = sum(r.liters for r in refuels)
-        total_cost = sum(r.total_cost for r in refuels)
-        total_km = sum(r.distance_from_last or 0 for r in refuels)
-        with_usd = [r for r in refuels if r.total_cost_usd is not None]
-        total_usd = sum(r.total_cost_usd for r in with_usd) if with_usd else None
-
-        lines = [
-            "=== ПІДСУМОК (усі записи цього користувача в базі) ===",
-            (
-                f"Заправок: {len(refuels)} | Літрів загалом: {total_liters:.2f} | "
-                f"Сума грн: {total_cost:.2f} | Сумарний пробіг між заправками (км): {total_km}"
-            ),
-        ]
-        if total_usd is not None:
-            lines.append(
-                f"USD по заправках де є курс: ${total_usd:.2f} (записів з USD: {len(with_usd)})"
-            )
-        lines.append("")
-        lines.append(
-            "Повний перелік (кожен рядок — одна заправка). Роздільник полів: | "
-            "Колонки: id | дата_час | АЗС | паливо | л | грн_за_л | грн_всього | USD | "
-            "одометр_км | км_від_попередньої_повної | л_на_100км | повний_бак(1/0)"
         )
-        lines.append("---")
-
-        for r in refuels:
-            usd = f"{r.total_cost_usd:.2f}" if r.total_cost_usd is not None else ""
-            dist = str(r.distance_from_last) if r.distance_from_last is not None else ""
-            cons = f"{r.consumption:.2f}" if r.consumption is not None else ""
-            ft = "1" if r.full_tank else "0"
-            row = " | ".join(
-                [
-                    str(r.id),
-                    r.date.strftime("%Y-%m-%d %H:%M"),
-                    _sanitize_cell(r.station_name),
-                    _sanitize_cell(r.fuel_type),
-                    f"{r.liters:.2f}",
-                    f"{r.price_per_liter:.2f}",
-                    f"{r.total_cost:.2f}",
-                    usd,
-                    str(r.odometer),
-                    dist,
-                    cons,
-                    ft,
-                ]
-            )
-            lines.append(row)
-
-        text = "\n".join(lines)
-        if len(text) > _AI_REFUEL_CONTEXT_MAX_CHARS:
-            text = text[:_AI_REFUEL_CONTEXT_MAX_CHARS] + (
-                "\n\n[... обрізано: перевищено ліміт розміру контексту ...]"
-            )
-            logger.warning(
-                "AI refuel context truncated: user_id=%s len>%s",
-                user_id,
-                _AI_REFUEL_CONTEXT_MAX_CHARS,
-            )
-
-        logger.info(
-            "AI refuel context: user_id=%s refuels=%s chars=%s",
-            user_id,
-            len(refuels),
-            len(text),
-        )
-        return text
-
-    except Exception as e:
-        logger.error(f"Error building refuel AI context: {e}", exc_info=True)
-        return f"Помилка отримання даних: {str(e)}"
+    return out
 
 
 @router.message(Command("ai"))
@@ -215,14 +138,13 @@ async def cmd_ai_help(message: Message):
         "• Яка середня витрата палива?\n"
         "• Скільки я витратив за останній місяць?\n"
         "• На якій АЗС найдешевше?\n"
-        "• Як змінюється витрата палива?\n"
-        "• Коли найкраще заправлятись?\n"
-        "• Порівняй витрати за різні місяці\n"
+        "• Порівняй витрати за два роки\n"
         "• Дай поради щодо економії\n\n"
-        "💬 Напишіть питання — у контексті для кожної відповіді передаються "
-        "<b>усі ваші заправки з бази</b> (повний перелік + підсумок).\n\n"
+        "🤖 Асистент працює як <b>агент</b>: сам обирає запити до бази (інструменти), "
+        "спочатку коротко планує відповідь — <b>не завантажує всі заправки в промпт</b> "
+        "(менше токенів).\n\n"
         "💡 <i>Пам'ятаю останні репліки діалогу — можна уточнювати</i>\n"
-        "📅 Точні суми по місяцях без AI: <code>/year</code> або <code>/year 2025</code>\n"
+        "📅 Точна таблиця по місяцях без AI: <code>/year</code> або <code>/year 2025</code>\n"
         "🗑 Команда /clear_chat - очистити історію діалогу"
     )
 
@@ -265,70 +187,23 @@ async def ai_chat(message: Message):
             telegram_id, username=fu.username, first_name=fu.first_name
         )
 
-        # Повний набір заправок у системному промпті
-        data_summary = await get_user_refuels_ai_context(db_user_id)
-
-        # Історія діалогу (останні 20 повідомлень = до 10 пар)
-        # ChatHistory.user_id is stored as Telegram id (legacy column usage)
+        # Історія діалогу (ChatHistory.user_id = telegram_id)
         async with async_session() as session:
             result = await session.execute(
                 select(ChatHistory)
                 .where(ChatHistory.user_id == telegram_id)
                 .order_by(ChatHistory.created_at.desc())
-                .limit(20)
+                .limit(_AI_HISTORY_MESSAGES)
             )
-            history_records = result.scalars().all()
-            history_records = list(reversed(history_records))  # Oldest first
+            history_records = list(reversed(result.scalars().all()))
 
-        # google-genai expects types.Content, not dicts (dict has no .role for the SDK)
-        gemini_history: list = []
-        for record in history_records:
-            role = "user" if record.role == "user" else "model"
-            gemini_history.append(
-                genai_types.Content(
-                    role=role,
-                    parts=[genai_types.Part(text=record.message)],
-                )
-            )
+        history_contents = _history_records_to_contents(history_records)
 
-        # Build system instruction with data and formatting rules
-        system_instruction = f"""Ти — повноцінний AI-асистент з обліку палива в цьому Telegram-боті.
-
-КРИТИЧНО: Нижче — ПОВНИЙ перелік УСІХ заправок цього користувача з бази (таблиця + підсумок). Це актуальні дані обліку. Не кажи, що «немає доступу до бази» чи «не бачиш дані»: опирайся лише на цей блок. Якщо заправок немає — відповідай відповідно (наприклад, запропонуй додати перші записи).
-
-Можеш рахувати будь-які агрегати (по місяцях, роках, АЗС, витраті), порівнювати періоди, знаходити аномалії, тренди, середні значення — усе це вже є в таблиці нижче.
-
-{data_summary}
-
-Відповідай детально й по суті українською. Опирайся на конкретні id/дати/суми з таблиці, коли це доречно.
-Якщо в даних є тренди чи закономірності — назви їх. Поради щодо економії — лише якщо доречно.
-
-ВАЖЛИВО - ФОРМАТУВАННЯ:
-- Використовуй ТІЛЬКИ ці HTML теги: <b>, <i>, <u>, <code>
-- НЕ використовуй: DOCTYPE, html, head, body, div, span, p, h1-h6, ul, ol, li
-- Заголовки: <b>Заголовок</b>
-- Списки: використовуй емоджі (📊, 📈, 💡, ⚠️, ✅) замість маркерів
-- Для важливих цифр: <b>123</b>
-- Розділяй розділи порожнім рядком (використовуй \n\n)
-- НЕ використовуй markdown **, #, - тощо
-- Роби відповідь короткою і чіткою, без зайвих слів; орієнтир — до ~3000 символів, щоб вміститись в одне повідомлення Telegram (якщо користувач явно просить «повний звіт» — структуруй стисло таблицями).
-- Відповідай ЧИСТИМ ТЕКСТОМ з простими тегами, БЕЗ HTML-документа
-
-Приклад формату:
-<b>📊 Аналіз частоти заправок:</b>
-
-За 90 днів - <b>5 заправок</b>
-Це приблизно раз на <b>18 днів</b>
-
-<b>💡 Рекомендації:</b>
-
-✅ Моніторте витрату палива
-⚠️ Перевірте тиск у шинах
-
-Якщо питання не стосується заправок або автомобілів, ввічливо скажи, що ти спеціалізуєшся тільки на аналізі витрат на паливо."""
-
-        # Get AI response with chat history and system instruction
-        ai_response = await get_gemini_ai_response(user_question, gemini_history, system_instruction)
+        ai_response = await run_fuel_agent(
+            user_question,
+            history_contents,
+            db_user_id,
+        )
 
         if not ai_response:
             await processing_msg.edit_text(

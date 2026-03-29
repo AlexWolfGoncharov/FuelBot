@@ -240,6 +240,8 @@ def normalize_gemini_chat_history(history: list) -> list:
 
 async def get_gemini_ai_response(prompt: str, chat_history: list = None, system_instruction: str = None) -> str:
     """
+    Legacy: простий чат без інструментів. Для Telegram-асистента використовуй services.ai_fuel_agent.run_fuel_agent.
+
     Get AI response from Gemini for general questions (chat assistant)
 
     Args:
