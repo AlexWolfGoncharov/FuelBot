@@ -1,0 +1,78 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+venv/
+ENV/
+env/
+.venv
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment variables
+.env
+
+# Local / personal
+.claude/
+import_data.json
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+logs/
+bot.log
+
+# Google Credentials
+credentials.json
+service-account.json
+google-credentials*.json
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Images
+*.jpg
+*.jpeg
+*.png
+*.gif
+!tests/test_data/**/*.jpg
+!tests/test_data/**/*.jpeg
+!tests/test_data/**/*.png
+
+# Temp files
+temp/
+tmp/
+*.tmp

@@ -1,0 +1,27 @@
+# Telegram Bot Framework
+aiogram==3.17.0
+
+# Environment variables
+python-dotenv==1.0.1
+
+# AI Services - NEW PACKAGE (google-generativeai deprecated)
+google-genai==1.6.0
+
+# Image Processing
+pillow==11.1.0
+pillow-heif==0.21.0
+
+# Database
+sqlalchemy==2.0.37
+aiosqlite==0.20.0
+asyncpg==0.30.0
+
+# Data Validation
+pydantic==2.10.6
+pydantic-settings==2.7.1
+
+# HTTP Client
+httpx==0.28.1
+
+# Utilities
+python-dateutil==2.9.0

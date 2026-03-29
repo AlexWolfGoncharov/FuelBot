@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  fuelbot:
+    build: .
+    container_name: fuelbot
+    restart: unless-stopped
+
+    # Environment variables from .env file
+    env_file:
+      - .env
+
+    # Volumes for persistent data
+    volumes:
+      - ./data:/app/data              # Database storage
+      - ./logs:/app/logs              # Logs (optional)
+      - ./credentials.json:/app/credentials.json:ro  # Google credentials (if using Sheets)
+
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # Health check (optional)
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
