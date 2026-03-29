@@ -50,12 +50,17 @@ def _receipt_meta_from_message(message: Message, image_data: bytes) -> dict:
 
 
 async def _strip_stale_smart_without_state(state: FSMContext) -> None:
-    """Якщо лишились smart_* без стану waiting_pair — прибрати (сирота після збою)."""
+    """
+    Прибрати «сирі» smart_* лише коли немає незавершеної пари.
+    НЕ стирати smart_odometer/smart_receipt, якщо одна половина вже збережена —
+    інакше друге фото при втраті FSM-стану (multi-worker, збій) втрачає пару.
+    """
     data = await state.get_data()
     if not any(k in data for k in SMART_PAIR_KEYS):
         return
+    if data.get("smart_odometer") is not None or data.get("smart_receipt") is not None:
+        return
     st = await state.get_state()
-    # get_state() повертає рядок; порівнювати з .state, не з об'єктом State
     if st == SmartPhotoStates.waiting_pair.state:
         return
     cleaned = {k: v for k, v in data.items() if k not in SMART_PAIR_KEYS}
@@ -386,48 +391,49 @@ async def smart_photo_handler(message: Message, state: FSMContext):
         recognized_type = result["type"]
         recognized_data = result["data"]
         data = await state.get_data()
+        pr = data.get("smart_receipt")
+        po = data.get("smart_odometer")
 
-        # --- Друге фото в режимі пари: зшити або замінити ту саму половину ---
+        # Зшити пару за даними в storage (не лише за FSM — стан може загубитися між воркерами)
+        if recognized_type == "receipt" and po is not None:
+            rc: ReceiptData = recognized_data
+            od = OdometerData(**po)
+            meta = _receipt_meta_from_message(message, image_data)
+            await _merge_smart_pair_go_full_tank(
+                message,
+                state,
+                rc,
+                od,
+                receipt_file_id=file_id,
+                odometer_file_id=data["smart_odometer_file_id"],
+                photo_datetime=meta["photo_datetime"],
+                telegram_message_date=meta["telegram_message_date"],
+                latitude=meta["latitude"],
+                longitude=meta["longitude"],
+            )
+            await processing_msg.delete()
+            return
+
+        if recognized_type == "odometer" and pr is not None:
+            rc = ReceiptData(**pr)
+            od: OdometerData = recognized_data
+            await _merge_smart_pair_go_full_tank(
+                message,
+                state,
+                rc,
+                od,
+                receipt_file_id=data["smart_receipt_file_id"],
+                odometer_file_id=file_id,
+                photo_datetime=data.get("smart_receipt_photo_datetime"),
+                telegram_message_date=data.get("smart_receipt_telegram_date"),
+                latitude=data.get("smart_receipt_latitude"),
+                longitude=data.get("smart_receipt_longitude"),
+            )
+            await processing_msg.delete()
+            return
+
+        # --- Друге фото в режимі пари: лише замінити ту саму половину або невідоме ---
         if current_state == SmartPhotoStates.waiting_pair.state:
-            pr = data.get("smart_receipt")
-            po = data.get("smart_odometer")
-
-            if recognized_type == "receipt" and po is not None:
-                rc: ReceiptData = recognized_data
-                od = OdometerData(**po)
-                meta = _receipt_meta_from_message(message, image_data)
-                await _merge_smart_pair_go_full_tank(
-                    message,
-                    state,
-                    rc,
-                    od,
-                    receipt_file_id=file_id,
-                    odometer_file_id=data["smart_odometer_file_id"],
-                    photo_datetime=meta["photo_datetime"],
-                    telegram_message_date=meta["telegram_message_date"],
-                    latitude=meta["latitude"],
-                    longitude=meta["longitude"],
-                )
-                await processing_msg.delete()
-                return
-
-            if recognized_type == "odometer" and pr is not None:
-                rc = ReceiptData(**pr)
-                od: OdometerData = recognized_data
-                await _merge_smart_pair_go_full_tank(
-                    message,
-                    state,
-                    rc,
-                    od,
-                    receipt_file_id=data["smart_receipt_file_id"],
-                    odometer_file_id=file_id,
-                    photo_datetime=data.get("smart_receipt_photo_datetime"),
-                    telegram_message_date=data.get("smart_receipt_telegram_date"),
-                    latitude=data.get("smart_receipt_latitude"),
-                    longitude=data.get("smart_receipt_longitude"),
-                )
-                await processing_msg.delete()
-                return
 
             if recognized_type == "receipt":
                 meta = _receipt_meta_from_message(message, image_data)
