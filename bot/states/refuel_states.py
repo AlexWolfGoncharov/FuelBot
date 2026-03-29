@@ -20,6 +20,11 @@ class BatchRefuelStates(StatesGroup):
     waiting_manual_date = State()
 
 
+class SmartPhotoStates(StatesGroup):
+    """Очікування другої частини пари (чек або одометр) після першого фото в smart-режимі"""
+    waiting_pair = State()
+
+
 class ManualRefuelStates(StatesGroup):
     """States for manual refuel entry (without photos)"""
     waiting_station = State()

@@ -9,9 +9,12 @@ from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
-from bot.states.refuel_states import RefuelStates, BatchRefuelStates
+from bot.states.refuel_states import RefuelStates, BatchRefuelStates, SmartPhotoStates
 from bot.utils.user_helpers import get_user_id_for_refuels
 from bot.handlers.refuel import _telegram_message_naive_utc
+from bot.keyboards.inline import get_full_tank_keyboard
+from models.schemas import ReceiptData, OdometerData
+from services.image import extract_gps_coordinates, extract_datetime_taken
 from services.ai_vision.gemini import recognize_smart
 from models.database import async_session, Refuel
 from sqlalchemy import select, and_
@@ -23,6 +26,80 @@ logger = logging.getLogger(__name__)
 # Storage for media group processing
 media_group_storage = {}
 media_group_timers = {}
+
+SMART_PAIR_KEYS = (
+    "smart_receipt",
+    "smart_receipt_file_id",
+    "smart_receipt_photo_datetime",
+    "smart_receipt_telegram_date",
+    "smart_receipt_latitude",
+    "smart_receipt_longitude",
+    "smart_odometer",
+    "smart_odometer_file_id",
+)
+
+
+def _receipt_meta_from_message(message: Message, image_data: bytes) -> dict:
+    lat, lon = extract_gps_coordinates(image_data)
+    return {
+        "photo_datetime": extract_datetime_taken(image_data),
+        "telegram_message_date": _telegram_message_naive_utc(message),
+        "latitude": float(lat) if lat is not None else None,
+        "longitude": float(lon) if lon is not None else None,
+    }
+
+
+async def _strip_stale_smart_without_state(state: FSMContext) -> None:
+    """Якщо лишились smart_* без стану waiting_pair — прибрати (сирота після збою)."""
+    data = await state.get_data()
+    if not any(k in data for k in SMART_PAIR_KEYS):
+        return
+    st = await state.get_state()
+    if st == SmartPhotoStates.waiting_pair:
+        return
+    cleaned = {k: v for k, v in data.items() if k not in SMART_PAIR_KEYS}
+    await state.set_data(cleaned)
+
+
+async def _merge_smart_pair_go_full_tank(
+    message: Message,
+    state: FSMContext,
+    receipt: ReceiptData,
+    odometer: OdometerData,
+    receipt_file_id: str,
+    odometer_file_id: str,
+    photo_datetime,
+    telegram_message_date,
+    latitude,
+    longitude,
+) -> None:
+    data = await state.get_data()
+    for k in SMART_PAIR_KEYS:
+        data.pop(k, None)
+    data.update(
+        {
+            "receipt": receipt.model_dump(),
+            "receipt_file_id": receipt_file_id,
+            "odometer": odometer.model_dump(),
+            "odometer_file_id": odometer_file_id,
+            "photo_datetime": photo_datetime,
+            "telegram_message_date": telegram_message_date,
+            "latitude": latitude,
+            "longitude": longitude,
+        }
+    )
+    await state.set_data(data)
+    await state.set_state(RefuelStates.asking_full_tank)
+    await message.answer(
+        "✅ <b>Чек і одометр зібрано в одну заправку</b>\n\n"
+        f"📍 <b>{receipt.station}</b> · {receipt.liters} л · {receipt.total_cost} грн\n"
+        f"🔢 Одометр: <b>{odometer.odometer} км</b>\n\n"
+        "⛽ Чи заправили ви бак до повного?\n\n"
+        "💡 <b>Це важливо для точного розрахунку витрати палива</b>\n"
+        "Витрата розраховується тільки між заправками до повного бака",
+        parse_mode="HTML",
+        reply_markup=get_full_tank_keyboard(),
+    )
 
 
 async def check_duplicate_refuel(user_id: int, receipt_data, odometer_data, photo_datetime=None) -> bool:
@@ -236,10 +313,10 @@ async def smart_photo_handler(message: Message, state: FSMContext):
     Smart handler for photos sent without command
     Automatically detects if it's a receipt or odometer
     Handles both single photos and media groups (albums)
+    Послідовні фото (чек потім одометр або навпаки) зшиваються в одну заправку.
     """
-    # Check if there's an active state - if yes, skip this handler
     current_state = await state.get_state()
-    if current_state is not None:
+    if current_state is not None and current_state != SmartPhotoStates.waiting_pair:
         return
 
     # Get internal user_id from telegram_id
@@ -272,6 +349,8 @@ async def smart_photo_handler(message: Message, state: FSMContext):
 
         return
 
+    await _strip_stale_smart_without_state(state)
+
     # Single photo - process immediately
     processing_msg = await message.answer("🔍 Аналізую фото...")
 
@@ -303,88 +382,224 @@ async def smart_photo_handler(message: Message, state: FSMContext):
         # Smart recognition - single API call
         result = await recognize_smart(image_data, user_context)
 
-        recognized_type = result['type']
-        recognized_data = result['data']
+        recognized_type = result["type"]
+        recognized_data = result["data"]
+        data = await state.get_data()
 
-        # Build response based on what was recognized
-        if recognized_type == 'receipt':
-            # Receipt detected
+        # --- Друге фото в режимі пари: зшити або замінити ту саму половину ---
+        if current_state == SmartPhotoStates.waiting_pair:
+            pr = data.get("smart_receipt")
+            po = data.get("smart_odometer")
+
+            if recognized_type == "receipt" and po is not None:
+                rc: ReceiptData = recognized_data
+                od = OdometerData(**po)
+                meta = _receipt_meta_from_message(message, image_data)
+                await _merge_smart_pair_go_full_tank(
+                    message,
+                    state,
+                    rc,
+                    od,
+                    receipt_file_id=file_id,
+                    odometer_file_id=data["smart_odometer_file_id"],
+                    photo_datetime=meta["photo_datetime"],
+                    telegram_message_date=meta["telegram_message_date"],
+                    latitude=meta["latitude"],
+                    longitude=meta["longitude"],
+                )
+                await processing_msg.delete()
+                return
+
+            if recognized_type == "odometer" and pr is not None:
+                rc = ReceiptData(**pr)
+                od: OdometerData = recognized_data
+                await _merge_smart_pair_go_full_tank(
+                    message,
+                    state,
+                    rc,
+                    od,
+                    receipt_file_id=data["smart_receipt_file_id"],
+                    odometer_file_id=file_id,
+                    photo_datetime=data.get("smart_receipt_photo_datetime"),
+                    telegram_message_date=data.get("smart_receipt_telegram_date"),
+                    latitude=data.get("smart_receipt_latitude"),
+                    longitude=data.get("smart_receipt_longitude"),
+                )
+                await processing_msg.delete()
+                return
+
+            if recognized_type == "receipt":
+                meta = _receipt_meta_from_message(message, image_data)
+                nd = {k: v for k, v in data.items() if k not in SMART_PAIR_KEYS}
+                nd.update(
+                    {
+                        "smart_receipt": recognized_data.model_dump(),
+                        "smart_receipt_file_id": file_id,
+                        "smart_receipt_photo_datetime": meta["photo_datetime"],
+                        "smart_receipt_telegram_date": meta["telegram_message_date"],
+                        "smart_receipt_latitude": meta["latitude"],
+                        "smart_receipt_longitude": meta["longitude"],
+                    }
+                )
+                await state.set_data(nd)
+                await state.set_state(SmartPhotoStates.waiting_pair)
+                text = (
+                    f"✅ <b>Чек оновлено</b> (впевненість: {recognized_data.confidence}%)\n\n"
+                    f"📍 {recognized_data.station} · {recognized_data.liters} л\n\n"
+                    "📎 <b>Надішліть наступним повідомленням фото одометра</b> "
+                    "(або /cancel)"
+                )
+                keyboard = InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="📤 Batch / альбом", callback_data="smart_start_batch"
+                            )
+                        ],
+                        [InlineKeyboardButton(text="❌ Скасувати", callback_data="smart_cancel")],
+                    ]
+                )
+                await processing_msg.delete()
+                await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
+                return
+
+            if recognized_type == "odometer":
+                nd = {k: v for k, v in data.items() if k not in SMART_PAIR_KEYS}
+                nd.update(
+                    {
+                        "smart_odometer": recognized_data.model_dump(),
+                        "smart_odometer_file_id": file_id,
+                    }
+                )
+                await state.set_data(nd)
+                await state.set_state(SmartPhotoStates.waiting_pair)
+                text = (
+                    f"✅ <b>Одометр оновлено</b> ({recognized_data.odometer} км)\n\n"
+                    "📎 <b>Надішліть наступним повідомленням фото чека</b> "
+                    "(або /cancel)"
+                )
+                keyboard = InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="📤 Batch / альбом", callback_data="smart_start_batch"
+                            )
+                        ],
+                        [InlineKeyboardButton(text="❌ Скасувати", callback_data="smart_cancel")],
+                    ]
+                )
+                await processing_msg.delete()
+                await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
+                return
+
+            await processing_msg.delete()
+            await message.answer(
+                "❓ Не зрозумів фото. Очікується <b>чек</b> або <b>одометр</b>.\n\n"
+                "Спробуйте ще раз або /cancel",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [InlineKeyboardButton(text="❌ Скасувати", callback_data="smart_cancel")]
+                    ]
+                ),
+            )
+            return
+
+        # --- Перше фото (немає активної пари) ---
+        if recognized_type == "receipt":
+            meta = _receipt_meta_from_message(message, image_data)
+            nd = {k: v for k, v in data.items() if k not in SMART_PAIR_KEYS}
+            nd.update(
+                {
+                    "smart_receipt": recognized_data.model_dump(),
+                    "smart_receipt_file_id": file_id,
+                    "smart_receipt_photo_datetime": meta["photo_datetime"],
+                    "smart_receipt_telegram_date": meta["telegram_message_date"],
+                    "smart_receipt_latitude": meta["latitude"],
+                    "smart_receipt_longitude": meta["longitude"],
+                }
+            )
+            await state.set_data(nd)
+            await state.set_state(SmartPhotoStates.waiting_pair)
             text = (
                 f"✅ <b>Розпізнав чек з АЗС</b> (впевненість: {recognized_data.confidence}%)\n\n"
                 f"📍 АЗС: <b>{recognized_data.station}</b>\n"
                 f"⛽ Паливо: <b>{recognized_data.fuel_type}</b>\n"
             )
-
-            # Show refund info if present
-            if hasattr(recognized_data, 'has_refund') and recognized_data.has_refund:
+            if hasattr(recognized_data, "has_refund") and recognized_data.has_refund:
                 text += (
                     f"📊 Літри: <b>{recognized_data.liters} л</b> "
                     f"(залито - повернуто: {recognized_data.refund_liters} л)\n"
-                    f"💰 Сума: <b>{recognized_data.total_cost} грн</b> "
-                    f"(сплачено - повернуто: {recognized_data.refund_amount} грн)\n"
+                    f"💰 Сума: <b>{recognized_data.total_cost} грн</b>\n"
                 )
             else:
                 text += (
                     f"📊 Літри: <b>{recognized_data.liters} л</b>\n"
                     f"💰 Сума: <b>{recognized_data.total_cost} грн</b>\n"
                 )
-
             text += (
                 f"💵 Ціна: <b>{recognized_data.price_per_liter} грн/л</b>\n"
                 f"📅 Дата: <b>{recognized_data.date} {recognized_data.time}</b>\n\n"
-                "Що робити далі?"
+                "📎 <b>Надішліть наступним повідомленням фото одометра</b> — "
+                "я зберу все в одну заправку.\n\n"
+                "<i>Або одразу додайте лише чек кнопкою нижче.</i>"
             )
-
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="➕ Додати цю заправку", callback_data="smart_add_receipt")],
-                [InlineKeyboardButton(text="📤 Почати batch режим", callback_data="smart_start_batch")],
-                [InlineKeyboardButton(text="❌ Скасувати", callback_data="smart_cancel")]
-            ])
-
-            # Save receipt data to state
-            await state.update_data(
-                smart_receipt=recognized_data.model_dump(),
-                smart_receipt_file_id=file_id
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="➕ Тільки чек → /add", callback_data="smart_add_receipt")],
+                    [InlineKeyboardButton(text="📤 Batch / альбом", callback_data="smart_start_batch")],
+                    [InlineKeyboardButton(text="❌ Скасувати", callback_data="smart_cancel")],
+                ]
             )
+            await processing_msg.delete()
+            await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
+            return
 
-        elif recognized_type == 'odometer':
-            # Odometer detected
+        if recognized_type == "odometer":
+            nd = {k: v for k, v in data.items() if k not in SMART_PAIR_KEYS}
+            nd.update(
+                {
+                    "smart_odometer": recognized_data.model_dump(),
+                    "smart_odometer_file_id": file_id,
+                }
+            )
+            await state.set_data(nd)
+            await state.set_state(SmartPhotoStates.waiting_pair)
             text = (
                 f"✅ <b>Розпізнав одометр</b> (впевненість: {recognized_data.confidence}%)\n\n"
                 f"🔢 Пробіг: <b>{recognized_data.odometer} км</b>\n\n"
-                "Що робити далі?"
+                "📎 <b>Надішліть наступним повідомленням фото чека</b> — "
+                "я зберу все в одну заправку.\n\n"
+                "<i>Або почніть з чека через меню.</i>"
             )
-
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="➕ Додати з цим одометром", callback_data="smart_add_odometer")],
-                [InlineKeyboardButton(text="📤 Почати batch режим", callback_data="smart_start_batch")],
-                [InlineKeyboardButton(text="❌ Скасувати", callback_data="smart_cancel")]
-            ])
-
-            # Save odometer data to state
-            await state.update_data(
-                smart_odometer=recognized_data.model_dump(),
-                smart_odometer_file_id=file_id
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="⛽ Спочатку чек (/add)", callback_data="add_refuel")],
+                    [InlineKeyboardButton(text="📤 Batch / альбом", callback_data="smart_start_batch")],
+                    [InlineKeyboardButton(text="❌ Скасувати", callback_data="smart_cancel")],
+                ]
             )
+            await processing_msg.delete()
+            await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
+            return
 
-        else:
-            # Could not recognize
-            text = (
-                "❓ <b>Не вдалося розпізнати фото</b>\n\n"
-                "Це може бути чек або одометр?\n"
-                "Спробуйте:\n"
-                "• Краще освітлення 💡\n"
-                "• Чіткіше фото 📸\n"
-                "• Розгорнутий документ 📄\n\n"
-                "Або почніть вручну:"
-            )
-
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        # unknown
+        text = (
+            "❓ <b>Не вдалося розпізнати фото</b>\n\n"
+            "Це може бути чек або одометр?\n"
+            "Спробуйте:\n"
+            "• Краще освітлення 💡\n"
+            "• Чіткіше фото 📸\n"
+            "• Розгорнутий документ 📄\n\n"
+            "Або почніть вручну:"
+        )
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
                 [InlineKeyboardButton(text="⛽ Додати заправку", callback_data="add_refuel")],
                 [InlineKeyboardButton(text="📤 Batch режим", callback_data="smart_start_batch")],
-                [InlineKeyboardButton(text="🏠 Головне меню", callback_data="main_menu")]
-            ])
-
+                [InlineKeyboardButton(text="🏠 Головне меню", callback_data="main_menu")],
+            ]
+        )
         await processing_msg.delete()
         await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
 
@@ -399,20 +614,27 @@ async def smart_photo_handler(message: Message, state: FSMContext):
 
 @router.callback_query(F.data == "smart_add_receipt")
 async def smart_add_receipt(callback: CallbackQuery, state: FSMContext):
-    """Continue adding refuel after receipt was recognized"""
+    """Continue adding refuel after receipt was recognized (лише чек, без пари)"""
     data = await state.get_data()
-    receipt = data.get('smart_receipt')
-    receipt_file_id = data.get('smart_receipt_file_id')
+    receipt = data.get("smart_receipt")
+    receipt_file_id = data.get("smart_receipt_file_id")
 
     if not receipt:
         await callback.answer("❌ Дані чека втрачено", show_alert=True)
         return
 
-    # Save to state in format expected by refuel handler
-    await state.update_data(
-        receipt=receipt,
-        receipt_file_id=receipt_file_id
+    nd = {k: v for k, v in data.items() if k not in SMART_PAIR_KEYS}
+    nd.update(
+        {
+            "receipt": receipt,
+            "receipt_file_id": receipt_file_id,
+            "photo_datetime": data.get("smart_receipt_photo_datetime"),
+            "telegram_message_date": data.get("smart_receipt_telegram_date"),
+            "latitude": data.get("smart_receipt_latitude"),
+            "longitude": data.get("smart_receipt_longitude"),
+        }
     )
+    await state.set_data(nd)
 
     await callback.message.edit_text(
         "⛽ Чи заправили ви бак до повного?\n\n"

@@ -15,6 +15,7 @@ from aiogram.types import Message, CallbackQuery
 from bot.keyboards.inline import get_confirm_keyboard, get_full_tank_keyboard
 from bot.keyboards.menu import get_main_menu, get_back_to_menu_button
 from bot.states.refuel_states import RefuelStates
+from bot.utils.user_helpers import get_user_id_for_refuels
 from models.schemas import RefuelCreate
 from services.ai_vision.gemini import recognize_receipt, recognize_odometer
 from services.currency.exchange_rate import get_exchange_rate_service
@@ -84,6 +85,67 @@ def resolve_refuel_datetime_from_state(
         return tg, True
 
     return datetime.now(), False
+
+
+async def _send_odometer_confirmation(
+    message: Message,
+    state: FSMContext,
+    telegram_user_id: int,
+    username: Optional[str],
+    first_name: Optional[str],
+) -> None:
+    """Показати підтвердження одометра (після фото або після smart-пари)."""
+    data = await state.get_data()
+    odometer_data = data["odometer"]
+    if isinstance(odometer_data, dict):
+        odo_val = odometer_data["odometer"]
+        odo_conf = odometer_data.get("confidence", 0)
+    else:
+        odo_val = odometer_data.odometer
+        odo_conf = odometer_data.confidence
+
+    receipt = data.get("receipt", {})
+    refuel_datetime, _ = resolve_refuel_datetime_from_state(receipt, data)
+
+    internal_uid = await get_user_id_for_refuels(
+        telegram_user_id, username, first_name
+    )
+
+    last_full_refuel = None
+    async with async_session() as session:
+        query = (
+            select(Refuel)
+            .where(Refuel.user_id == internal_uid)
+            .where(Refuel.full_tank == 1)  # Integer у БД; PostgreSQL не приймає integer = boolean
+            .order_by(Refuel.date.desc())
+        )
+        if refuel_datetime:
+            query = query.where(Refuel.date < refuel_datetime)
+        query = query.limit(1)
+        result = await session.execute(query)
+        last_full_refuel = result.scalar_one_or_none()
+
+    distance_text = ""
+    if last_full_refuel:
+        distance = odo_val - last_full_refuel.odometer
+        if distance > 0:
+            distance_text = (
+                f"🛣 Пробіг з останньої заправки до повного: <b>{distance} км</b>\n"
+            )
+            await state.update_data(distance_from_last=distance)
+
+    text = (
+        f"✅ <b>Одометр розпізнано</b> (впевненість: {odo_conf}%)\n\n"
+        f"🔢 Пробіг: <b>{odo_val} км</b>\n"
+        f"{distance_text}\n"
+        "Все вірно?"
+    )
+    await message.answer(
+        text,
+        reply_markup=get_confirm_keyboard(),
+        parse_mode="HTML",
+    )
+    await state.set_state(RefuelStates.confirm_odometer)
 
 
 @router.callback_query(F.data == "add_refuel")
@@ -286,15 +348,25 @@ async def full_tank_yes(callback: CallbackQuery, state: FSMContext):
     """Handle full tank confirmation"""
     await state.update_data(full_tank=True)
     await callback.message.edit_reply_markup(reply_markup=None)
-    await callback.message.answer(
-        "📸 Тепер відправте фото спідометра/одометра\n\n"
-        "💡 <b>Важливо:</b>\n"
-        "• Показання пробігу мають бути чітко видні\n"
-        "• Знімайте загальний пробіг, не добовий\n\n"
-        "Або /cancel для скасування",
-        parse_mode="HTML"
-    )
-    await state.set_state(RefuelStates.waiting_for_odometer)
+    data = await state.get_data()
+    if data.get("odometer") and data.get("odometer_file_id"):
+        await _send_odometer_confirmation(
+            callback.message,
+            state,
+            callback.from_user.id,
+            callback.from_user.username,
+            callback.from_user.first_name,
+        )
+    else:
+        await callback.message.answer(
+            "📸 Тепер відправте фото спідометра/одометра\n\n"
+            "💡 <b>Важливо:</b>\n"
+            "• Показання пробігу мають бути чітко видні\n"
+            "• Знімайте загальний пробіг, не добовий\n\n"
+            "Або /cancel для скасування",
+            parse_mode="HTML",
+        )
+        await state.set_state(RefuelStates.waiting_for_odometer)
     await callback.answer()
     logger.info(f"User {callback.from_user.id} confirmed full tank")
 
@@ -304,15 +376,25 @@ async def full_tank_no(callback: CallbackQuery, state: FSMContext):
     """Handle partial tank confirmation"""
     await state.update_data(full_tank=False)
     await callback.message.edit_reply_markup(reply_markup=None)
-    await callback.message.answer(
-        "📸 Тепер відправте фото спідометра/одометра\n\n"
-        "💡 <b>Важливо:</b>\n"
-        "• Показання пробігу мають бути чітко видні\n"
-        "• Знімайте загальний пробіг, не добовий\n\n"
-        "Або /cancel для скасування",
-        parse_mode="HTML"
-    )
-    await state.set_state(RefuelStates.waiting_for_odometer)
+    data = await state.get_data()
+    if data.get("odometer") and data.get("odometer_file_id"):
+        await _send_odometer_confirmation(
+            callback.message,
+            state,
+            callback.from_user.id,
+            callback.from_user.username,
+            callback.from_user.first_name,
+        )
+    else:
+        await callback.message.answer(
+            "📸 Тепер відправте фото спідометра/одометра\n\n"
+            "💡 <b>Важливо:</b>\n"
+            "• Показання пробігу мають бути чітко видні\n"
+            "• Знімайте загальний пробіг, не добовий\n\n"
+            "Або /cancel для скасування",
+            parse_mode="HTML",
+        )
+        await state.set_state(RefuelStates.waiting_for_odometer)
     await callback.answer()
     logger.info(f"User {callback.from_user.id} confirmed partial tank")
 
@@ -357,55 +439,17 @@ async def process_odometer(message: Message, state: FSMContext):
         # Save to state
         await state.update_data(
             odometer=odometer_data.model_dump(),
-            odometer_file_id=photo.file_id
-        )
-
-        # Get receipt data to know the refuel date (EXIF > OCR > Telegram)
-        data = await state.get_data()
-        receipt = data.get('receipt', {})
-        refuel_datetime, _ = resolve_refuel_datetime_from_state(receipt, data)
-
-        # Get previous FULL TANK refuel BEFORE this refuel's date to calculate distance
-        user_id = message.from_user.id
-        last_full_refuel = None
-
-        async with async_session() as session:
-            query = (
-                select(Refuel)
-                .where(Refuel.user_id == user_id)
-                .where(Refuel.full_tank == True)  # Only full tank refuels
-                .order_by(Refuel.date.desc())
-            )
-
-            # If we know the refuel date, only get refuels BEFORE this date
-            if refuel_datetime:
-                query = query.where(Refuel.date < refuel_datetime)
-
-            query = query.limit(1)
-            result = await session.execute(query)
-            last_full_refuel = result.scalar_one_or_none()
-
-        distance_text = ""
-        if last_full_refuel:
-            distance = odometer_data.odometer - last_full_refuel.odometer
-            if distance > 0:
-                distance_text = f"🛣 Пробіг з останньої заправки до повного: <b>{distance} км</b>\n"
-                await state.update_data(distance_from_last=distance)
-
-        text = (
-            f"✅ <b>Одометр распознан</b> (уверенность: {odometer_data.confidence}%)\n\n"
-            f"🔢 Пробег: <b>{odometer_data.odometer} км</b>\n"
-            f"{distance_text}\n"
-            f"Все верно?"
+            odometer_file_id=photo.file_id,
         )
 
         await processing_msg.delete()
-        await message.answer(
-            text,
-            reply_markup=get_confirm_keyboard(),
-            parse_mode="HTML"
+        await _send_odometer_confirmation(
+            message,
+            state,
+            message.from_user.id,
+            message.from_user.username,
+            message.from_user.first_name,
         )
-        await state.set_state(RefuelStates.confirm_odometer)
 
         logger.info(
             f"Odometer recognized for user {message.from_user.id}: "
