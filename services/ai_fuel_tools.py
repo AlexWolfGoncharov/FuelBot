@@ -1,9 +1,11 @@
 """
 Інструменти для AI-агента: вибіркові запити до refuels (без повного дампу в промпт).
 Повертають компактні dict — серіалізуються в JSON для Gemini.
-"""
-from __future__ import annotations
 
+Без ``from __future__ import annotations``: google-genai AFC будує Schema з
+``inspect.Parameter.annotation``; при відкладених анотаціях це рядки на кшталт
+``'int'``, і парсер падає з «Failed to parse the parameter …».
+"""
 from datetime import datetime, timedelta
 from decimal import Decimal
 import json
@@ -20,6 +22,12 @@ def _num(x: Any) -> Optional[float]:
     if isinstance(x, Decimal):
         return float(x)
     return float(x)
+
+
+def _clamp_calendar_year(y: int) -> int:
+    if y < 1990 or y > 2100:
+        raise ValueError(f"Рік поза діапазоном: {y}")
+    return y
 
 
 def _clamp_int_limit(value: Any, default: int, cap: int) -> int:
@@ -160,6 +168,14 @@ def make_fuel_tools(user_id: int) -> List[Callable[..., Any]]:
         y = datetime.now().year
         return await _monthly_report(y)
 
+    async def fuel_monthly_for_y(yr: int) -> dict[str, Any]:
+        """Помісячні агрегати за вказаний календарний рік (yr, наприклад 2024): км, л/100км, грн, USD, літри, заправок."""
+        try:
+            y = _clamp_calendar_year(int(yr))
+        except (TypeError, ValueError) as e:
+            return {"error": str(e)}
+        return await _monthly_report(y)
+
     async def fuel_recent_refuels(limit: int) -> dict[str, Any]:
         """Останні заправки (новіші спочатку). limit — ціле число, наприклад 15; максимум 40."""
         lim = _clamp_int_limit(limit, 15, 40)
@@ -241,6 +257,7 @@ def make_fuel_tools(user_id: int) -> List[Callable[..., Any]]:
     return [
         fuel_account_overview,
         fuel_monthly_current_year,
+        fuel_monthly_for_y,
         fuel_recent_refuels,
         fuel_refuels_in_date_range,
         fuel_search_stations,
