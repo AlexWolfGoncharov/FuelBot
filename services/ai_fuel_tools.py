@@ -114,12 +114,7 @@ def make_fuel_tools(user_id: int) -> List[Callable[..., Any]]:
             "rows_with_usd": int(usd_n or 0),
         }
 
-    async def fuel_monthly_for_year(year: str) -> dict[str, Any]:
-        """Агрегати по кожному місяцю за календарний рік (рік як рядок, наприклад 2025): км, л/100км, грн, USD, літри, заправок."""
-        try:
-            y = _parse_year_str(year)
-        except ValueError as e:
-            return {"error": str(e)}
+    async def _monthly_report(y: int) -> dict[str, Any]:
         async with async_session() as session:
             result = await session.execute(
                 select(Refuel)
@@ -172,9 +167,22 @@ def make_fuel_tools(user_id: int) -> List[Callable[..., Any]]:
             },
         }
 
-    async def fuel_recent_refuels(limit: str = "15") -> dict[str, Any]:
-        """Останні заправки (новіші спочатку). limit — рядок з числом, максимум 40."""
-        lim = _parse_limit_str(limit, 15, 40)
+    async def fuel_monthly_current_year() -> dict[str, Any]:
+        """Помісячні агрегати за поточний календарний рік: км, л/100км, грн, USD, літри, заправок. Без параметрів."""
+        y = datetime.now().year
+        return await _monthly_report(y)
+
+    async def fuel_monthly_for_calendar_year(calendar_year: str) -> dict[str, Any]:
+        """Помісячні агрегати за вказаний рік; calendar_year наприклад рядок 2024 або 2025 (параметр НЕ називається year — обмеження API)."""
+        try:
+            y = _parse_year_str(calendar_year)
+        except ValueError as e:
+            return {"error": str(e)}
+        return await _monthly_report(y)
+
+    async def fuel_recent_refuels(limit: str) -> dict[str, Any]:
+        """Останні заправки (новіші спочатку). limit — рядок з числом, наприклад 15; максимум 40."""
+        lim = _parse_limit_str(limit or "15", 15, 40)
         async with async_session() as session:
             result = await session.execute(
                 select(Refuel)
@@ -216,13 +224,13 @@ def make_fuel_tools(user_id: int) -> List[Callable[..., Any]]:
 
     async def fuel_search_stations(
         query: str,
-        limit: str = "12",
+        limit: str,
     ) -> dict[str, Any]:
-        """Пошук АЗС за підрядком у назві. limit — рядок з числом, максимум 20."""
+        """Пошук АЗС за підрядком у назві. limit — рядок з числом, наприклад 12; максимум 20."""
         q = (query or "").strip()[:80]
         if len(q) < 2:
             return {"error": "Занадто короткий запит (мінімум 2 символи)"}
-        lim = _parse_limit_str(limit, 12, 20)
+        lim = _parse_limit_str(limit or "12", 12, 20)
         pattern = f"%{q}%"
         async with async_session() as session:
             result = await session.execute(
@@ -252,7 +260,8 @@ def make_fuel_tools(user_id: int) -> List[Callable[..., Any]]:
 
     return [
         fuel_account_overview,
-        fuel_monthly_for_year,
+        fuel_monthly_current_year,
+        fuel_monthly_for_calendar_year,
         fuel_recent_refuels,
         fuel_refuels_in_date_range,
         fuel_search_stations,
