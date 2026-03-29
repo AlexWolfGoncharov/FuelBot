@@ -9,9 +9,11 @@ from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery
 from sqlalchemy import select
+from sqlalchemy.exc import NoResultFound
 
 from models.database import async_session, Refuel, ChatHistory
 from bot.keyboards.menu import get_back_to_menu_button, get_ai_chat_buttons
+from bot.utils.user_helpers import get_user_id_by_telegram_id
 from services.ai_vision.gemini import get_gemini_ai_response
 
 router = Router()
@@ -151,16 +153,26 @@ async def ai_chat(message: Message):
     processing_msg = await message.answer("🤖 Аналізую ваші дані...")
 
     try:
-        user_id = message.from_user.id
+        telegram_id = message.from_user.id
+        # Refuel.user_id is internal users.id, not Telegram id
+        try:
+            db_user_id = await get_user_id_by_telegram_id(telegram_id)
+        except NoResultFound:
+            await processing_msg.edit_text(
+                "Спочатку натисніть /start, щоб бот зареєстрував вас у системі.",
+                reply_markup=get_back_to_menu_button(),
+            )
+            return
 
         # Get user's refuel data summary
-        data_summary = await get_user_refuels_summary(user_id)
+        data_summary = await get_user_refuels_summary(db_user_id)
 
         # Get chat history (last 10 messages to keep context manageable)
+        # ChatHistory.user_id is stored as Telegram id (legacy column usage)
         async with async_session() as session:
             result = await session.execute(
                 select(ChatHistory)
-                .where(ChatHistory.user_id == user_id)
+                .where(ChatHistory.user_id == telegram_id)
                 .order_by(ChatHistory.created_at.desc())
                 .limit(10)
             )
@@ -176,8 +188,9 @@ async def ai_chat(message: Message):
             })
 
         # Build system instruction with data and formatting rules
-        system_instruction = f"""Ти - експерт-аналітик по витратам на паливо та економії палива.
-Тебе попросили проаналізувати дані користувача про заправки автомобіля та дати експертну відповідь українською мовою.
+        system_instruction = f"""Ти - експерт-аналітик по витратам на паливо та економії палива в межах цього Telegram-бота.
+
+КРИТИЧНО: Нижче вже передано зріз даних з обліку заправок цього користувача з бази бота. Ти НЕ маєш казати, що «немає доступу до бази» або що ти «не бачиш дані» — якщо блок порожній або написано що заправок немає, відповідай з цього факту (наприклад запропонуй додати заправки), а не відмовляйся.
 
 {data_summary}
 
@@ -240,7 +253,7 @@ async def ai_chat(message: Message):
         async with async_session() as session:
             # Save user message
             user_msg = ChatHistory(
-                user_id=user_id,
+                user_id=telegram_id,
                 role="user",
                 message=user_question
             )
@@ -248,7 +261,7 @@ async def ai_chat(message: Message):
 
             # Save assistant response
             assistant_msg = ChatHistory(
-                user_id=user_id,
+                user_id=telegram_id,
                 role="assistant",
                 message=ai_response
             )
@@ -263,7 +276,7 @@ async def ai_chat(message: Message):
             reply_markup=get_ai_chat_buttons()
         )
 
-        logger.info(f"AI response sent to user {user_id} for question: {user_question[:50]}")
+        logger.info(f"AI response sent to user telegram_id={telegram_id} for question: {user_question[:50]}")
 
     except Exception as e:
         logger.error(f"Error in AI chat: {e}", exc_info=True)
